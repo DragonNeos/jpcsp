@@ -36,7 +36,7 @@ import org.apache.log4j.Logger;
 
 /*
  * Ported from ProOnline aemu server
- * https://code.google.com/p/aemu/source/browse/#hg%2Fpspnet_adhocctl_server
+ * https://github.com/MrColdbird/aemu/tree/master/pspnet_adhocctl_server
  */
 public class ProOnlineServer {
 	protected static Logger log = ProOnlineNetworkAdapter.log;

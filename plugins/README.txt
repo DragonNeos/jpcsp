@@ -30,4 +30,4 @@ Plugins:
 *******************************************************************************	
 
 If you wish to add your plugin to JPCSP, please contact us at 
-http://www.emunewz.net/forum/index.php or https://code.google.com/p/jpcsp/
+http://www.emunewz.net/forum/index.php or https://github.com/jpcsp/jpcsp

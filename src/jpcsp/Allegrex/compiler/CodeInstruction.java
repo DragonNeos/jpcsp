@@ -286,7 +286,7 @@ public class CodeInstruction {
 
         if (delaySlotCodeInstruction.hasFlags(Instruction.FLAG_HAS_DELAY_SLOT)) {
         	// Issue a warning when compiling an instruction having a delay slot inside a delay slot.
-        	// See http://code.google.com/p/pcsx2/source/detail?r=5541
+        	// See https://github.com/PCSX2/pcsx2/commit/c78b6157cb2b39eb5941dad6806b253886ea08ba (aka r5541)
 		String lineSeparator = System.getProperty("line.separator");
         	log.warn(String.format("Instruction in a delay slot having a delay slot:%s%s%s%s", lineSeparator, this, lineSeparator, delaySlotCodeInstruction));
         }
