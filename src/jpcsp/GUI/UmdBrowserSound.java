@@ -24,7 +24,10 @@ import javax.sound.sampled.SourceDataLine;
 
 import jpcsp.Memory;
 import jpcsp.MemoryMap;
+import jpcsp.HLE.Modules;
 import jpcsp.HLE.VFS.IVirtualFile;
+import jpcsp.HLE.modules.SysMemUserForUser;
+import jpcsp.HLE.modules.SysMemUserForUser.SysMemInfo;
 import jpcsp.HLE.modules.sceAtrac3plus;
 import jpcsp.HLE.modules.sceAtrac3plus.AtracFileInfo;
 import jpcsp.media.codec.CodecFactory;
@@ -37,8 +40,9 @@ public class UmdBrowserSound {
 	private boolean done;
 	private boolean threadExit;
 	private Memory mem;
-	private int samplesAddr = MemoryMap.START_USERSPACE;
-	private int inputAddr = MemoryMap.START_USERSPACE + 0x10000;
+	private SysMemInfo memInfo;
+	private int samplesAddr;
+	private int inputAddr;
 	private int inputLength;
 	private int inputPosition;
 	private int inputOffset;
@@ -58,7 +62,7 @@ public class UmdBrowserSound {
 	}
 
 	public UmdBrowserSound(Memory mem, byte[] data) {
-		this.mem = mem;
+		initMemory(mem);
 
 		if (read(data)) {
 			startThread();
@@ -68,7 +72,7 @@ public class UmdBrowserSound {
 	}
 
 	public UmdBrowserSound(Memory mem, IVirtualFile vFile, int codecType, AtracFileInfo atracFileInfo) {
-		this.mem = mem;
+		initMemory(mem);
 
 		byte[] audioData = Utilities.readCompleteFile(vFile);
 		int atracBytesPerFrame = (((audioData[2] & 0x03) << 8) | ((audioData[3] & 0xFF) << 3)) + 8;
@@ -87,6 +91,20 @@ public class UmdBrowserSound {
 		}
 	}
 
+	private void initMemory(Memory mem) {
+		this.mem = mem;
+
+		memInfo = Modules.SysMemUserForUserModule.malloc(SysMemUserForUser.KERNEL_PARTITION_ID, "UmdBrowserSound", SysMemUserForUser.PSP_SMEM_Low, 0x20000, 0);
+		if (memInfo != null) {
+			samplesAddr = memInfo.addr;
+			inputAddr = memInfo.addr + 0x10000;
+		} else {
+			// PSP not yet initialized, use any memory space
+			samplesAddr = MemoryMap.START_USERSPACE;
+			inputAddr = MemoryMap.START_USERSPACE + 0x10000;
+		}
+	}
+
 	public void stopSound() {
 		done = true;
 		while (!threadExit) {
@@ -95,6 +113,13 @@ public class UmdBrowserSound {
 
 		if (mLine != null) {
 			mLine.close();
+		}
+
+		if (memInfo != null) {
+			Modules.SysMemUserForUserModule.free(memInfo);
+			memInfo = null;
+			samplesAddr = 0;
+			inputAddr = 0;
 		}
 	}
 

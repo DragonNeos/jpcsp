@@ -22,6 +22,7 @@ import java.util.List;
 import jpcsp.Loader;
 import jpcsp.Memory;
 import jpcsp.NIDMapper;
+import jpcsp.HLE.HLEModuleManager;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.kernel.managers.SceUidManager;
 import jpcsp.HLE.modules.SysMemUserForUser.SysMemInfo;
@@ -119,8 +120,9 @@ public class SceModule {
         address = sceModuleAddressOffset;
 
         // Link SceModule structs together
-        if (previousModule != null)
+        if (previousModule != null) {
             previousModule.next = address;
+        }
         previousModule = this;
 
         // Internal context
@@ -188,13 +190,17 @@ public class SceModule {
 
     /** For use when unloading modules. */
     public void free() {
-    	for (SysMemInfo sysMemInfo : allocatedMemory) {
-    		// Overwrite the allocated memory so that its code can be invalidated
-    		Memory.getInstance().memset(sysMemInfo.addr, (byte) -1, sysMemInfo.size);
+    	if (!allocatedMemory.isEmpty()) {
+        	for (SysMemInfo sysMemInfo : allocatedMemory) {
+        		// Overwrite the allocated memory so that its code can be invalidated
+        		Memory.getInstance().memset(sysMemInfo.addr, (byte) -1, sysMemInfo.size);
 
-    		Modules.SysMemUserForUserModule.free(sysMemInfo);
+        		Modules.SysMemUserForUserModule.free(sysMemInfo);
+        	}
+        	allocatedMemory.clear();
+
+        	HLEModuleManager.getInstance().UnloadFlash0Module(this);
     	}
-    	allocatedMemory.clear();
     }
 
     public void addAllocatedMemory(SysMemInfo sysMemInfo) {
@@ -315,6 +321,13 @@ public class SceModule {
 
 	@Override
 	public String toString() {
-		return String.format("SceModule '%s'", modname);
+		StringBuilder s = new StringBuilder("SceModule ");
+		if (modname != null) {
+			s.append(String.format("'%s'", modname));
+		} else if (pspfilename != null) {
+			s.append(String.format("'%s'", pspfilename));
+		}
+
+		return s.toString();
 	}
 }

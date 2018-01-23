@@ -36,7 +36,6 @@ import jpcsp.HLE.Modules;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.pspFileBuffer;
 import jpcsp.HLE.modules.sceAudiocodec.AudiocodecInfo;
-import jpcsp.media.codec.CodecFactory;
 import jpcsp.media.codec.mp3.Mp3Decoder;
 import jpcsp.media.codec.mp3.Mp3Header;
 import jpcsp.util.Utilities;
@@ -58,7 +57,7 @@ public class sceMp3 extends HLEModule {
     public void start() {
     	ids = new Mp3Info[2];
     	for (int i = 0; i < ids.length; i++) {
-    		ids[i] = new Mp3Info();
+    		ids[i] = new Mp3Info(i);
     	}
 
         super.start();
@@ -152,13 +151,17 @@ public class sceMp3 extends HLEModule {
         private int outputIndex;
         private int loopNum;
         private int startPos;
+        private long endPos;
         private int sampleRate;
         private int bitRate;
         private int maxSamples;
         private int channels;
         private int version;
         private int numberOfFrames;
-        private int outputChannels;
+
+        public Mp3Info(int id) {
+        	super(id);
+        }
 
         public boolean isReserved() {
             return reserved;
@@ -170,6 +173,7 @@ public class sceMp3 extends HLEModule {
             this.outputAddr = outputAddr;
             this.outputSize = outputSize;
             this.startPos = (int) startPos;
+            this.endPos = endPos;
             inputBuffer = new pspFileBuffer(bufferAddr + reservedBufferSize, bufferSize - reservedBufferSize, 0, this.startPos);
             inputBuffer.setFileMaxSize((int) endPos);
             loopNum = -1; // Looping indefinitely by default
@@ -180,13 +184,12 @@ public class sceMp3 extends HLEModule {
 
         @Override
 		public void release() {
+        	super.release();
             reserved = false;
         }
 
-        @Override
 		public void initCodec() {
-            codec = CodecFactory.getCodec(PSP_CODEC_MP3);
-            setCodecInitialized(false);
+        	initCodec(PSP_CODEC_MP3);
         }
 
         public int notifyAddStream(int bytesToAdd) {
@@ -206,7 +209,12 @@ public class sceMp3 extends HLEModule {
         }
 
         public boolean isStreamDataNeeded() {
-        	boolean isDataNeeded = getWritableBytes() > 0;
+        	boolean isDataNeeded;
+        	if (inputBuffer.isFileEnd()) {
+        		isDataNeeded = false;
+        	} else {
+        		isDataNeeded = getWritableBytes() > 0;
+        	}
 
         	return isDataNeeded;
         }
@@ -267,16 +275,18 @@ public class sceMp3 extends HLEModule {
 		            result = outputBytes;
 	            }
 
-	            if (inputBuffer.getCurrentSize() < minimumInputBufferSize && inputBuffer.isFileEnd() && loopNum != 0) {
-	            	if (log.isDebugEnabled()) {
-	            		log.debug(String.format("Looping loopNum=%d", loopNum));
-	            	}
+	            if (inputBuffer.isFileEnd() && loopNum != 0) {
+	            	if (inputBuffer.getCurrentSize() < minimumInputBufferSize || (inputBuffer.getFilePosition() - inputBuffer.getCurrentSize()) > endPos) {
+		            	if (log.isDebugEnabled()) {
+		            		log.debug(String.format("Looping loopNum=%d", loopNum));
+		            	}
 
-	            	if (loopNum > 0) {
-	            		loopNum--;
-	            	}
+		            	if (loopNum > 0) {
+		            		loopNum--;
+		            	}
 
-	            	resetPlayPosition(0);
+		            	resetPlayPosition(0);
+	            	}
 	            }
         	}
 
@@ -393,9 +403,6 @@ public class sceMp3 extends HLEModule {
 
         public void init() {
         	parseMp3FrameHeader();
-
-        	// Always output in stereo, even if the input is mono
-        	outputChannels = 2;
 
             codec.init(0, channels, outputChannels, 0);
 

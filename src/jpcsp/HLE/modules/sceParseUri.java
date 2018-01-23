@@ -21,9 +21,13 @@ import java.net.URISyntaxException;
 
 import org.apache.log4j.Logger;
 
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
+import jpcsp.HLE.HLEUnimplemented;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.PspString;
 import jpcsp.HLE.TPointer;
@@ -100,7 +104,7 @@ public class sceParseUri extends HLEModule {
 	}
 
 	@HLEFunction(nid = 0x568518C9, version = 150)
-	public int sceUriParse(@CanBeNull TPointer parsedUriArea, PspString url, @CanBeNull TPointer workArea, @CanBeNull TPointer32 workAreaSizeAddr, int workAreaSize) {
+	public int sceUriParse(@CanBeNull @BufferInfo(lengthInfo=LengthInfo.fixedLength, length=44, usage=Usage.out) TPointer parsedUriArea, PspString url, @CanBeNull @BufferInfo(lengthInfo=LengthInfo.nextNextParameter, usage=Usage.out) TPointer workArea, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 workAreaSizeAddr, int workAreaSize) {
 		if (parsedUriArea.isNull() || workArea.isNull()) {
 			// The required workArea size if maximum the size if the URL + 7 times the null-byte
 			// for string termination.
@@ -108,10 +112,15 @@ public class sceParseUri extends HLEModule {
 			return 0;
 		}
 
+		String urlString = sceHttp.patchUrl(url.getString());
+		if (!urlString.equals(url.getString())) {
+			log.info(String.format("sceUriParse patched URL '%s' into '%s'", url.getString(), urlString));
+		}
+
 		// Parse the URL into URI components
 		URI uri;
 		try {
-			uri = new URI(url.getString());
+			uri = new URI(urlString);
 		} catch (URISyntaxException e) {
 			log.error("parsedUriArea", e);
 			return -1;
@@ -121,15 +130,27 @@ public class sceParseUri extends HLEModule {
 		String userInfo = uri.getUserInfo();
 		String userInfoUserName = userInfo;
 		String userInfoPassword = "";
-		int userInfoColon = userInfo.indexOf(":");
-		if (userInfoColon >= 0) {
-			userInfoUserName = userInfo.substring(0, userInfoColon);
-			userInfoPassword = userInfo.substring(userInfoColon + 1);
+		if (userInfo != null) {
+			int userInfoColon = userInfo.indexOf(":");
+			if (userInfoColon >= 0) {
+				userInfoUserName = userInfo.substring(0, userInfoColon);
+				userInfoPassword = userInfo.substring(userInfoColon + 1);
+			}
+		}
+
+		String query = uri.getQuery();
+		if (query != null && query.length() > 0) {
+			query = "?" + query;
 		}
 
 		pspParsedUri parsedUri = new pspParsedUri();
 		int offset = 0;
 
+		if (uri.getSchemeSpecificPart() != null && uri.getSchemeSpecificPart().startsWith("//")) {
+			parsedUri.noSlash = 0;
+		} else {
+			parsedUri.noSlash = 1;
+		}
 		// Store the URI components in sequence into workArea
 		// and store the respective addresses into the parsedUri structure.
 		parsedUri.schemeAddr = workArea.getAddress() + offset;
@@ -148,10 +169,22 @@ public class sceParseUri extends HLEModule {
 		offset = addString(workArea, workAreaSize, offset, uri.getPath());
 
 		parsedUri.queryAddr = workArea.getAddress() + offset;
-		offset = addString(workArea, workAreaSize, offset, uri.getQuery());
+		offset = addString(workArea, workAreaSize, offset, query);
 
 		parsedUri.fragmentAddr = workArea.getAddress() + offset;
 		offset = addString(workArea, workAreaSize, offset, uri.getFragment());
+
+		if (uri.getPort() < 0) {
+			if ("http".equals(uri.getScheme())) {
+				parsedUri.port = 80;
+			} else if ("https".equals(uri.getScheme())) {
+				parsedUri.port = 443;
+			} else {
+				parsedUri.port = 0;
+			}
+		} else {
+			parsedUri.port = uri.getPort();
+		}
 
 		workAreaSizeAddr.setValue(offset);
 		parsedUri.write(parsedUriArea);
@@ -160,7 +193,10 @@ public class sceParseUri extends HLEModule {
 	}
 
 	@HLEFunction(nid = 0x7EE318AF, version = 150)
-	public int sceUriBuild(@CanBeNull TPointer workArea, @CanBeNull TPointer32 workAreaSizeAddr, int workAreaSize, pspParsedUri parsedUri, int flags) {
+	public int sceUriBuild(@CanBeNull @BufferInfo(lengthInfo=LengthInfo.nextNextParameter, usage=Usage.out) TPointer workArea, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 workAreaSizeAddr, int workAreaSize, @BufferInfo(lengthInfo=LengthInfo.fixedLength, length=44, usage=Usage.in) TPointer parsedUriAddr, int flags) {
+		pspParsedUri parsedUri = new pspParsedUri();
+		parsedUri.read(parsedUriAddr);
+
 		// Extract the URI components from the parseUri structure
 		String scheme = getUriComponent(parsedUri.schemeAddr, flags, 0x1);
 		String userInfoUserName = getUriComponent(parsedUri.userInfoUserNameAddr, flags, 0x10);
@@ -171,37 +207,52 @@ public class sceParseUri extends HLEModule {
 		String fragment = getUriComponent(parsedUri.fragmentAddr, flags, 0x80);
 		int port = (flags & 0x4) != 0 ? parsedUri.port : -1;
 
-		// Build the userInfo in format "<userName>:<password>"
-		String userInfo = null;
-		if (userInfoUserName != null || userInfoPassword != null) {
-			if (userInfoUserName == null) {
-				userInfo = ":" + userInfoPassword;
-			} else if (userInfoPassword == null) {
-				userInfo = userInfoUserName;
-			} else {
-				userInfo = userInfoUserName + ":" + userInfoPassword;
+		// Build the complete URI
+		String uri = "";
+		if (scheme != null && scheme.length() > 0) {
+			uri += scheme + ":";
+		}
+		if (parsedUri.noSlash == 0) {
+			uri += "//";
+		}
+		if (userInfoUserName != null) {
+			uri += userInfoUserName;
+		}
+		if (userInfoPassword != null && userInfoPassword.length() > 0) {
+			uri += ":" + userInfoPassword;
+		}
+		if (host != null) {
+			uri += host;
+		}
+		if (port > 0) {
+			int defaultPort = -1;
+			if (parsedUri.schemeAddr != 0) {
+				String protocol = Utilities.readStringZ(parsedUri.schemeAddr);
+				defaultPort = Utilities.getDefaultPortForProtocol(protocol);
+			}
+			if (port > 0 && port != defaultPort) {
+				uri += ":" + port;
 			}
 		}
-
-		// Build the complete URI
-		URI uri;
-		try {
-			uri = new URI(scheme, userInfo, host, port, path, query, fragment);
-		} catch (URISyntaxException e) {
-			log.error("sceUriBuild", e);
-			return -1;
+		if (path != null) {
+			uri += path;
+		}
+		if (query != null) {
+			uri += query;
+		}
+		if (fragment != null) {
+			uri += fragment;
 		}
 
 		// Return the URI and its size
-		String resultUri = uri.toASCIIString();
 		if (workArea.isNotNull()) {
-			workArea.setStringNZ(workAreaSize, resultUri);
+			workArea.setStringNZ(workAreaSize, uri);
 
 			if (log.isDebugEnabled()) {
-				log.debug(String.format("sceUriBuild returning '%s'", resultUri));
+				log.debug(String.format("sceUriBuild returning '%s'", uri));
 			}
 		}
-		workAreaSizeAddr.setValue(resultUri.length());
+		workAreaSizeAddr.setValue(uri.length() + 1);
 
 		return 0;
 	}
@@ -290,6 +341,15 @@ public class sceParseUri extends HLEModule {
 			memoryWriter.flush();
 		}
 		unescapedLengthAddr.setValue(unescapedLength);
+
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x8885A782, version = 150)
+	public int sceUriSweepPath(@BufferInfo(lengthInfo=LengthInfo.nextNextParameter, usage=Usage.out) TPointer outputAddr, @BufferInfo(lengthInfo=LengthInfo.nextParameter, usage=Usage.in) TPointer inputAddr, int length) {
+		// TODO Implemented URI path sweeping...
+		outputAddr.memcpy(inputAddr.getAddress(), length);
 
 		return 0;
 	}

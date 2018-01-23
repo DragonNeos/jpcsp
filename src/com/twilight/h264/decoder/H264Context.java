@@ -3926,7 +3926,7 @@ public class H264Context {
     }
     
     private static int av_clip_uint8(int a) {
-        if ((a&(~0x000000FF)) != 0) return (-a)>>31;
+        if ((a&(~0x000000FF)) != 0) return ((-a)>>31) & 0xFF;
         else           return a;
     }    
 
@@ -6555,6 +6555,7 @@ public class H264Context {
 		        case NAL_DPC:
 		        	// DebugTool.printDebugString("Decoding NAL_DPC...\n");
 
+		        	hx.inter_gb = new GetBitContext();
 		        	hx.inter_gb.init_get_bits(ptr_base, ptr_offset, bit_length);
 		            hx.inter_gb_ptr= hx.inter_gb;
 	

@@ -17,6 +17,9 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
 
 package jpcsp.HLE.modules;
 
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLELogging;
@@ -36,6 +39,7 @@ import jpcsp.State;
 import jpcsp.Allegrex.compiler.RuntimeContext;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.kernel.managers.SystemTimeManager;
+import jpcsp.util.Utilities;
 
 import org.apache.log4j.Logger;
 
@@ -64,6 +68,7 @@ public class UtilsForUser extends HLEModule {
 
     private static class SceKernelUtilsContext {
     	private final String algorithm;
+    	private final int hashLength;
         // Context vars.
         private int part1;
         private int part2;
@@ -78,8 +83,9 @@ public class UtilsForUser extends HLEModule {
         // Internal vars.
         private byte[] input;
 
-        protected SceKernelUtilsContext(String algorithm) {
+        protected SceKernelUtilsContext(String algorithm, int hashLength) {
         	this.algorithm = algorithm;
+        	this.hashLength = hashLength;
             part1 = 0;
             part2 = 0;
             part3 = 0;
@@ -113,22 +119,24 @@ public class UtilsForUser extends HLEModule {
 
         public int result(TPointer ctxAddr, TPointer resultAddr) {
             byte[] hash = null;
-            try {
-                MessageDigest md = MessageDigest.getInstance(algorithm);
-                hash = md.digest(input);
-            } catch (Exception e) {
-                // Ignore...
-            	log.warn(String.format("SceKernelUtilsContext(%s).result", algorithm), e);
+            if (input != null) {
+	            try {
+	                MessageDigest md = MessageDigest.getInstance(algorithm);
+	                hash = md.digest(input);
+	            } catch (Exception e) {
+	                // Ignore...
+	            	log.warn(String.format("SceKernelUtilsContext(%s).result", algorithm), e);
+	            }
             }
 
             if (hash != null) {
-            	resultAddr.setArray(hash, 16);
+            	resultAddr.setArray(hash, hashLength);
             }
 
             return 0;
         }
 
-        protected static int digest(TPointer inAddr, int inSize, TPointer outAddr, String algorithm) {
+        protected static int digest(TPointer inAddr, int inSize, TPointer outAddr, String algorithm, int hashLength) {
             byte[] input = inAddr.getArray8(inSize);
             byte[] hash = null;
             try {
@@ -139,7 +147,7 @@ public class UtilsForUser extends HLEModule {
             	log.warn(String.format("SceKernelUtilsContext(%s).digest", algorithm), e);
             }
             if (hash != null) {
-            	outAddr.setArray(hash, 16);
+            	outAddr.setArray(hash, hashLength);
             }
 
             return 0;
@@ -150,11 +158,11 @@ public class UtilsForUser extends HLEModule {
     	private static final String algorithm = "MD5";
 
     	public SceKernelUtilsMd5Context() {
-        	super(algorithm);
+        	super(algorithm, 16);
         }
 
     	public static int digest(TPointer inAddr, int inSize, TPointer outAddr) {
-    		return digest(inAddr, inSize, outAddr, algorithm);
+    		return digest(inAddr, inSize, outAddr, algorithm, 16);
     	}
     }
 
@@ -162,11 +170,11 @@ public class UtilsForUser extends HLEModule {
     	private static final String algorithm = "SHA-1";
 
     	public SceKernelUtilsSha1Context() {
-			super(algorithm);
+			super(algorithm, 20);
 		}
 
     	public static int digest(TPointer inAddr, int inSize, TPointer outAddr) {
-    		return digest(inAddr, inSize, outAddr, algorithm);
+    		return digest(inAddr, inSize, outAddr, algorithm, 20);
     	}
     }
 
@@ -189,7 +197,6 @@ public class UtilsForUser extends HLEModule {
         return 0;
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0xC2DF770E, version = 150)
 	public int sceKernelIcacheInvalidateRange(TPointer addr, int size) {
 		if (log.isInfoEnabled()) {
@@ -201,51 +208,47 @@ public class UtilsForUser extends HLEModule {
         return 0;
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0xC8186A58, version = 150)
-	public int sceKernelUtilsMd5Digest(TPointer inAddr, int inSize, TPointer outAddr) {
-    	return SceKernelUtilsMd5Context.digest(inAddr, inSize, outAddr);
+	public int sceKernelUtilsMd5Digest(@BufferInfo(lengthInfo=LengthInfo.nextParameter, usage=Usage.in) TPointer inAddr, int inSize, @BufferInfo(lengthInfo=LengthInfo.fixedLength, length=16, usage=Usage.out) TPointer outAddr) {
+    	int result = SceKernelUtilsMd5Context.digest(inAddr, inSize, outAddr);
+    	if (log.isDebugEnabled()) {
+    		log.debug(String.format("sceKernelUtilsMd5Digest input:%s, output:%s", Utilities.getMemoryDump(inAddr.getAddress(), inSize), Utilities.getMemoryDump(outAddr.getAddress(), 16)));
+    	}
+    	return result;
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0x9E5C5086, version = 150)
 	public int sceKernelUtilsMd5BlockInit(TPointer md5CtxAddr) {
         md5Ctx = new SceKernelUtilsMd5Context();
         return md5Ctx.init(md5CtxAddr);
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0x61E1E525, version = 150)
 	public int sceKernelUtilsMd5BlockUpdate(TPointer md5CtxAddr, TPointer inAddr, int inSize) {
         return md5Ctx.update(md5CtxAddr, inAddr, inSize);
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0xB8D24E78, version = 150)
 	public int sceKernelUtilsMd5BlockResult(TPointer md5CtxAddr, TPointer outAddr) {
         return md5Ctx.result(md5CtxAddr, outAddr);
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0x840259F1, version = 150)
-	public int sceKernelUtilsSha1Digest(TPointer inAddr, int inSize, TPointer outAddr) {
+	public int sceKernelUtilsSha1Digest(@BufferInfo(lengthInfo=LengthInfo.nextParameter, usage=Usage.in) TPointer inAddr, int inSize, @BufferInfo(lengthInfo=LengthInfo.fixedLength, length=20, usage=Usage.out) TPointer outAddr) {
     	return SceKernelUtilsSha1Context.digest(inAddr, inSize, outAddr);
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0xF8FCD5BA, version = 150)
 	public int sceKernelUtilsSha1BlockInit(TPointer sha1CtxAddr) {
         sha1Ctx = new SceKernelUtilsSha1Context();
         return sha1Ctx.init(sha1CtxAddr);
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0x346F6DA8, version = 150)
 	public int sceKernelUtilsSha1BlockUpdate(TPointer sha1CtxAddr, TPointer inAddr, int inSize) {
         return sha1Ctx.update(sha1CtxAddr, inAddr, inSize);
 	}
 
-    @HLELogging(level="info")
 	@HLEFunction(nid = 0x585F1C09, version = 150)
 	public int sceKernelUtilsSha1BlockResult(TPointer sha1CtxAddr, TPointer outAddr) {
         return sha1Ctx.result(sha1CtxAddr, outAddr);
@@ -366,7 +369,6 @@ public class UtilsForUser extends HLEModule {
 		return 0;
 	}
 
-	@HLELogging(level="info")
 	@HLEFunction(nid = 0x920F104A, version = 150)
 	public void sceKernelIcacheInvalidateAll() {
 		// Some games attempt to change compiled code at runtime

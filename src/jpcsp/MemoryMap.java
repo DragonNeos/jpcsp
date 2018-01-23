@@ -29,25 +29,25 @@ public class MemoryMap {
 
     public static final int START_RAM                = 0x08000000;
     public static final int END_RAM_32MB             = 0x09FFFFFF;
-    public static final int END_RAM_64MB             = 0x0BBFFFFF;
+    public static final int END_RAM_64MB             = 0x0BFFFFFF;
     public static       int END_RAM                  = END_RAM_32MB;
     public static       int SIZE_RAM                 = END_RAM - START_RAM + 1;
 
-    public static final int START_IO_0               = 0x1C000000;
-    public static final int END_IO_0                 = 0x1FBFFFFF;
+    public static final int START_IO_0               = 0xBC000000;
+    public static final int END_IO_0                 = 0xBFBFFFFF;
 
-    public static final int START_IO_1               = 0x1FD00000;
-    public static final int END_IO_1                 = 0x1FFFFFFF;
+    public static final int START_IO_1               = 0xBFD00000;
+    public static final int END_IO_1                 = 0xBFFFFFFF;
 
-    public static final int START_EXCEPTIO_VEC       = 0x1FC00000;
-    public static final int END_EXCEPTIO_VEC         = 0x1FCFFFFF;
+    public static final int START_EXCEPTIO_VEC       = 0xBFC00000;
+    public static final int END_EXCEPTIO_VEC         = 0xBFCFFFFF;
 
     public static final int START_KERNEL             = 0x88000000; // K0
     public static final int END_KERNEL               = 0x887FFFFF; // K0
 
     public static final int START_USERSPACE          = 0x08800000; // KU0
     public static final int END_USERSPACE_32MB       = 0x09FFFFFF;
-    public static final int END_USERSPACE_64MB       = 0x0BBFFFFF;
+    public static final int END_USERSPACE_64MB       = 0x0BFFFFFF;
     public static       int END_USERSPACE            = END_USERSPACE_32MB; // KU0
 
     public static final int START_UNCACHED_RAM_VIDEO = 0x44000000;

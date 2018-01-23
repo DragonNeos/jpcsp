@@ -26,13 +26,43 @@ import jpcsp.util.Utilities;
 final public class TPointer implements ITPointerBase {
 	private Memory memory;
 	private int address;
-	public static final TPointer NULL = new TPointer(null, 0);
+	private boolean isNull;
+	public static final TPointer NULL = new TPointer();
+
+	protected TPointer() {
+		memory = null;
+		address = 0;
+		isNull = true;
+	}
 
 	public TPointer(Memory memory, int address) {
 		this.memory = memory;
-		this.address = address & Memory.addressMask;
+		this.address = memory.normalize(address);
+		isNull = (address == 0);
 	}
-	
+
+	public TPointer(TPointer base) {
+		memory = base.getMemory();
+		address = base.getAddress();
+		isNull = base.isNull();
+	}
+
+	public TPointer(TPointer base, int addressOffset) {
+		memory = base.getMemory();
+		if (base.isNull()) {
+			address = 0;
+		} else {
+			address = base.getAddress() + addressOffset;
+		}
+		isNull = base.isNull();
+	}
+
+	public void add(int addressOffset) {
+		if (isNotNull()) {
+			address += addressOffset;
+		}
+	}
+
 	@Override
 	public boolean isAddressGood() {
 		return Memory.isAddressGood(address);
@@ -47,19 +77,31 @@ final public class TPointer implements ITPointerBase {
 	public int getAddress() {
 		return address;
 	}
-	
+
+	public void setAddress(int address) {
+		this.address = memory.normalize(address);
+		isNull = (address == 0);
+	}
+
+	@Override
 	public Memory getMemory() {
 		return memory;
 	}
 
 	@Override
 	public boolean isNull() {
-		return address == 0;
+		return isNull;
 	}
 
 	@Override
 	public boolean isNotNull() {
-		return address != 0;
+		return !isNull;
+	}
+
+	public TPointer forceNonNull() {
+		isNull = false;
+
+		return this;
 	}
 
 	public byte  getValue8() { return getValue8(0); }
@@ -100,6 +142,10 @@ final public class TPointer implements ITPointerBase {
 		setValue32(offset, Float.floatToRawIntBits(value));
 	}
 
+	public String getStringZ() {
+		return Utilities.readStringZ(memory, address);
+	}
+
 	public String getStringNZ(int n) {
 		return getStringNZ(0, n);
 	}
@@ -125,13 +171,31 @@ final public class TPointer implements ITPointerBase {
 	}
 
 	public byte[] getArray8(int offset, int n) {
-		byte[] bytes = new byte[n];
-		IMemoryReader memoryReader = MemoryReader.getMemoryReader(getAddress() + offset, n, 1);
-		for (int i = 0; i < n; i++) {
-			bytes[i] = (byte) memoryReader.readNext();
+		return getArray8(offset, new byte[n], 0, n);
+	}
+
+	public byte[] getArray8(byte[] bytes) {
+		if (bytes == null) {
+			return bytes;
+		}
+		return getArray8(0, bytes, 0, bytes.length);
+	}
+
+	public byte[] getArray8(int offset, byte[] bytes, int bytesOffset, int n) {
+		if (isNotNull()) {
+			IMemoryReader memoryReader = MemoryReader.getMemoryReader(getMemory(), getAddress() + offset, n, 1);
+			for (int i = 0; i < n; i++) {
+				bytes[bytesOffset + i] = (byte) memoryReader.readNext();
+			}
 		}
 
 		return bytes;
+	}
+
+	public void setArray(byte[] bytes) {
+		if (bytes != null) {
+			setArray(bytes, bytes.length);
+		}
 	}
 
 	public void setArray(byte[] bytes, int n) {
@@ -139,11 +203,61 @@ final public class TPointer implements ITPointerBase {
 	}
 
 	public void setArray(int offset, byte[] bytes, int n) {
-		IMemoryWriter memoryWriter = MemoryWriter.getMemoryWriter(getAddress() + offset, n, 1);
-		for (int i = 0; i < n; i++) {
-			memoryWriter.writeNext(bytes[i] & 0xFF);
+		setArray(offset, bytes, 0, n);
+	}
+
+	public void setArray(int offset, byte[] bytes, int bytesOffset, int n) {
+		if (isNotNull()) {
+			IMemoryWriter memoryWriter = MemoryWriter.getMemoryWriter(getMemory(), getAddress() + offset, n, 1);
+			for (int i = 0; i < n; i++) {
+				memoryWriter.writeNext(bytes[bytesOffset + i] & 0xFF);
+			}
+			memoryWriter.flush();
 		}
-		memoryWriter.flush();
+	}
+
+	public TPointer getPointer() {
+		return getPointer(0);
+	}
+
+	public TPointer getPointer(int offset) {
+		if (isNull()) {
+			return TPointer.NULL;
+		}
+
+		return new TPointer(getMemory(), getValue32(offset));
+	}
+
+	public void setPointer(TPointer value) {
+		setPointer(0, value);
+	}
+
+	public void setPointer(int offset, TPointer value) {
+		if (value == null) {
+			setValue32(offset, 0);
+		} else {
+			setValue32(offset, value.getAddress());
+		}
+	}
+
+	public void memcpy(int src, int length) {
+		memcpy(0, src, length);
+	}
+
+	public void memcpy(int offset, int src, int length) {
+		if (isNotNull()) {
+			memory.memcpy(getAddress() + offset, src, length);
+		}
+	}
+
+	public void memmove(int src, int length) {
+		memmove(0, src, length);
+	}
+
+	public void memmove(int offset, int src, int length) {
+		if (isNotNull()) {
+			memory.memmove(getAddress() + offset, src, length);
+		}
 	}
 
 	/**
@@ -196,6 +310,12 @@ final public class TPointer implements ITPointerBase {
 	 */
 	public void clear(int offset, int length) {
 		memset(offset, (byte) 0, length);
+	}
+
+	public void setUnalignedValue32(int offset, int value) {
+		if (isNotNull()) {
+			Utilities.writeUnaligned32(getMemory(), getAddress() + offset, value);
+		}
 	}
 
 	@Override

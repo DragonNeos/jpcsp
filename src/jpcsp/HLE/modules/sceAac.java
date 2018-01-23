@@ -39,7 +39,6 @@ import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.pspFileBuffer;
 import jpcsp.HLE.modules.SysMemUserForUser.SysMemInfo;
 import jpcsp.HLE.modules.sceAudiocodec.AudiocodecInfo;
-import jpcsp.media.codec.CodecFactory;
 import jpcsp.util.Utilities;
 
 public class sceAac extends HLEModule {
@@ -62,6 +61,10 @@ public class sceAac extends HLEModule {
         private int loopNum;
         private int startPos;
 
+    	protected AacInfo(int id) {
+			super(id);
+		}
+
         public boolean isInit() {
             return init;
         }
@@ -79,15 +82,16 @@ public class sceAac extends HLEModule {
             halfBufferSize = (bufferSize - reservedBufferSize) >> 1;
         }
 
-        @Override
 		public void initCodec() {
+        	initCodec(PSP_CODEC_AAC);
             init = true;
-            codec = CodecFactory.getCodec(PSP_CODEC_AAC);
-            codec.init(0, 2, 2, 0); // TODO How to find out correct parameter values?
+            codec.init(0, outputChannels, outputChannels, 0);
+            setCodecInitialized();
         }
 
         @Override
 		public void release() {
+        	super.release();
             init = false;
         }
 
@@ -285,7 +289,7 @@ public class sceAac extends HLEModule {
     public void hleAacInit(int numberIds) {
         ids = new AacInfo[numberIds];
         for (int i = 0; i < numberIds; i++) {
-            ids[i] = new AacInfo();
+            ids[i] = new AacInfo(i);
         }
     }
 

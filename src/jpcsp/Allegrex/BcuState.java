@@ -92,7 +92,7 @@ public class BcuState extends LsuState {
         npc = pc + 4;
     }
 
-    public boolean doJR(int rs) {
+	public boolean doJR(int rs) {
         npc = getRegister(rs);
         return true;
     }
@@ -102,6 +102,11 @@ public class BcuState extends LsuState {
             setRegister(rd, pc + 4);
         }
         npc = getRegister(rs);
+        // It seems the PSP ignores the lowest 2 bits of the address.
+        // These bits are used and set by interruptman.prx
+        // but never cleared explicitly before executing a jalr instruction.
+        npc &= 0xFFFFFFFC;
+
         return true;
     }
 
@@ -174,7 +179,7 @@ public class BcuState extends LsuState {
     public boolean doJ(int uimm26) {
         npc = jumpTarget(pc, uimm26);
         if (npc == pc - 4) {
-            Processor.log.info("Pausing emulator - jump to self (death loop)");
+            log.info("Pausing emulator - jump to self (death loop)");
             Emulator.PauseEmuWithStatus(Emulator.EMU_STATUS_JUMPSELF);
         }
         return true;
@@ -189,7 +194,7 @@ public class BcuState extends LsuState {
     public boolean doBEQ(int rs, int rt, int simm16) {
         npc = (getRegister(rs) == getRegister(rt)) ? branchTarget(pc, simm16) : (pc + 4);
         if (npc == pc - 4 && rs == rt) {
-            Processor.log.info("Pausing emulator - branch to self (death loop)");
+            log.info("Pausing emulator - branch to self (death loop)");
             Emulator.PauseEmuWithStatus(Emulator.EMU_STATUS_JUMPSELF);
         }
         return true;
@@ -244,5 +249,26 @@ public class BcuState extends LsuState {
         }
 		pc += 4;
         return false;
+    }
+
+    public int doERET(Processor processor) {
+    	int status = processor.cp0.getStatus();
+    	int epc;
+    	if ((status & 0x4) != 0) {
+    		status &= ~0x4; // Clear ERL
+    		epc = processor.cp0.getErrorEpc();
+    	} else {
+    		status &= ~0x2; // Clear EXL
+    		epc = processor.cp0.getEpc();
+    	}
+    	processor.cp0.setStatus(status);
+
+    	processor.enableInterrupts();
+
+    	if (Emulator.log.isDebugEnabled()) {
+    		Emulator.log.debug(String.format("0x%08X - eret with status=0x%X, epc=0x%08X", processor.cpu.pc, status, epc));
+    	}
+
+    	return epc;
     }
 }

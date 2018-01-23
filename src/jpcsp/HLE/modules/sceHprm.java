@@ -16,6 +16,9 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.HLE.modules;
 
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.Usage;
+import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
 import jpcsp.HLE.HLEUnimplemented;
@@ -90,7 +93,54 @@ public class sceHprm extends HLEModule {
     }
 
     @HLEFunction(nid = 0x40D2F9F0, version = 150)
-    public int sceHprmReadLatch(TPointer latchAddr) {
+    public int sceHprmReadLatch(TPointer32 latchAddr) {
+    	// Return dummy values
+    	latchAddr.setValue( 0, 0);
+    	latchAddr.setValue( 4, 0);
+    	latchAddr.setValue( 8, 0);
+    	latchAddr.setValue(12, 0);
+
+    	return 0;
+    }
+
+    /**
+     * @return 0 - Cable not connected
+     * @return 1 - S-Video Cable / AV (composite) cable
+     * @return 2 - D Terminal Cable / Component Cable
+     * @return < 0 - Error
+     **/
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x1528D408, version = 150)
+    public int sceHprm_driver_1528D408() {
+        return 1;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xDC895B2B, version = 660)
+    public int sceHprm_driver_DC895B2B() {
+    	return 0;
+    }
+
+    @HLEFunction(nid = 0xE9B776BE, version = 660)
+    public int sceHprmReadLatch_660(TPointer32 latchAddr) {
+    	return sceHprmReadLatch(latchAddr);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xBAD0828E, version = 150)
+    public int sceHprmGetModel(@CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown1, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown2, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown3, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown4) {
+    	// Return dummy values
+    	unknown1.setValue(0);
+    	unknown2.setValue(0);
+    	unknown3.setValue(0);
+    	unknown4.setValue(0);
+
         return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x0B83352B, version = 660)
+    public int sceHprmGetModel_660(@CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown1, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown2, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown3, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 unknown4) {
+        return sceHprmGetModel(unknown1, unknown2, unknown3, unknown4);
     }
 }

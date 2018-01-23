@@ -41,9 +41,11 @@ import jpcsp.Allegrex.Decoder;
 import jpcsp.Allegrex.Instructions;
 import jpcsp.Allegrex.Common.Instruction;
 import jpcsp.Allegrex.compiler.nativeCode.NativeCodeManager;
+import jpcsp.HLE.kernel.types.IAction;
 import jpcsp.memory.IMemoryReader;
 import jpcsp.memory.MemoryReader;
 import jpcsp.memory.MemorySections;
+import jpcsp.memory.mmio.MMIO;
 import jpcsp.settings.AbstractBoolSettingsListener;
 import jpcsp.settings.AbstractIntSettingsListener;
 import jpcsp.settings.Settings;
@@ -150,6 +152,7 @@ public class Compiler implements ICompiler {
     private static final int maxRecompileExecutable = 50;
     private CompilerTypeManager compilerTypeManager;
     private HashSet<Integer> interpretedAddresses = new HashSet<Integer>();
+    private Set<Integer> useMMIOAddresses = new HashSet<Integer>();
 
 	private class IgnoreInvalidMemoryAccessSettingsListerner extends AbstractBoolSettingsListener {
 		@Override
@@ -293,7 +296,14 @@ public class Compiler implements ICompiler {
     	}
 
     	if (codeBlock.areOpcodesChanged()) {
-			invalidateCodeBlock(codeBlock);
+    		IAction updateOpcodesAction = codeBlock.getUpdateOpcodesAction();
+    		if (updateOpcodesAction != null) {
+    			// Execute the action provided by the code block to update the opcodes
+    			updateOpcodesAction.execute();
+    		} else {
+    			// This is the default action when the opcodes has been updated
+    			invalidateCodeBlock(codeBlock);
+    		}
 		} else {
 			// The opcodes of the code block could get updated by the application "after" calling an icache instruction.
 			// Check if the opcodes have been updated the next time the code block is executed.
@@ -344,7 +354,6 @@ public class Compiler implements ICompiler {
         if (log.isDebugEnabled()) {
             log.debug(String.format("Compiler.interpret Block 0x%08X", startAddress));
         }
-        startAddress = startAddress & Memory.addressMask;
         CodeBlock codeBlock = new CodeBlock(startAddress, instanceIndex);
 
         codeBlock.addCodeBlock();
@@ -387,7 +396,6 @@ public class Compiler implements ICompiler {
         }
         int maxBranchInstructions = Integer.MAX_VALUE; // 5 for FRONTIER_1337 homebrew
         MemorySections memorySections = MemorySections.getInstance();
-        startAddress = startAddress & Memory.addressMask;
         CodeBlock codeBlock = new CodeBlock(startAddress, instanceIndex);
         Stack<Integer> pendingBlockAddresses = new Stack<Integer>();
         pendingBlockAddresses.clear();
@@ -395,11 +403,11 @@ public class Compiler implements ICompiler {
         Set<Integer> branchingToAddresses = new HashSet<Integer>();
         while (!pendingBlockAddresses.isEmpty()) {
             int pc = pendingBlockAddresses.pop();
-            if (!Memory.isAddressGood(pc)) {
+            if (!isAddressGood(pc)) {
                 if (isIgnoreInvalidMemory()) {
-                    log.warn(String.format("IGNORING: Trying to compile an invalid address 0x%08X", pc));
+                    log.warn(String.format("IGNORING: Trying to compile an invalid address 0x%08X while compiling from 0x%08X", pc, startAddress));
                 } else {
-                    log.error(String.format("Trying to compile an invalid address 0x%08X", pc));
+                    log.error(String.format("Trying to compile an invalid address 0x%08X while compiling from 0x%08X", pc, startAddress));
                 }
             	return null;
             }
@@ -439,6 +447,8 @@ public class Compiler implements ICompiler {
 
                     if (isEndBlockInsn(pc, opcode, insn)) {
                     	endPc = npc;
+                    } else if (pc < endPc && insn.hasFlags(Instruction.FLAG_SYSCALL)) {
+                    	endPc = pc;
                     }
 
                     if (insn.hasFlags(Instruction.FLAG_STARTS_NEW_BLOCK)) {
@@ -470,7 +480,9 @@ public class Compiler implements ICompiler {
                         }
                     }
 
-                    codeBlock.addInstruction(pc, opcode, insn, isBranchTarget, isBranching, branchingTo);
+                    boolean useMMIO = useMMIOAddresses.contains(pc & Memory.addressMask);
+
+                    codeBlock.addInstruction(pc, opcode, insn, isBranchTarget, isBranching, branchingTo, useMMIO);
                     pc = npc;
 
                     isBranchTarget = false;
@@ -540,11 +552,24 @@ public class Compiler implements ICompiler {
         return context;
     }
 
+    private boolean isAddressGood(int address) {
+    	if (Memory.isAddressGood(address)) {
+    		return true;
+    	}
+    	if (interpretedAddresses.contains(address)) {
+    		return true;
+    	}
+    	if (RuntimeContextLLE.getMMIO() != null) {
+    		return MMIO.isAddressGood(address);
+    	}
+    	return false;
+    }
+
     public IExecutable compile(int address, int instanceIndex) {
-    	if (!Memory.isAddressGood(address)) {
-            if(isIgnoreInvalidMemory())
+    	if (!isAddressGood(address)) {
+            if (isIgnoreInvalidMemory()) {
                 log.warn(String.format("IGNORING: Trying to compile an invalid address 0x%08X", address));
-            else {
+            } else {
                 log.error(String.format("Trying to compile an invalid address 0x%08X", address));
                 Emulator.PauseEmu();
             }
@@ -671,5 +696,13 @@ public class Compiler implements ICompiler {
 
 	public CompilerTypeManager getCompilerTypeManager() {
 		return compilerTypeManager;
+	}
+
+	public void addMMIORange(int startAddress, int length) {
+		startAddress &= Memory.addressMask;
+
+		for (int i = 0; i < length; i += 4) {
+			useMMIOAddresses.add(startAddress + i);
+		}
 	}
 }

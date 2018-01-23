@@ -16,15 +16,19 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.HLE.modules;
 
+import jpcsp.Processor;
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
+import jpcsp.HLE.HLELogging;
 import jpcsp.HLE.HLEModule;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.TPointer;
 import jpcsp.HLE.TPointer32;
+import jpcsp.HLE.BufferInfo.LengthInfo;
 import jpcsp.HLE.kernel.Managers;
 import jpcsp.HLE.kernel.types.SceKernelTls;
-import jpcsp.hardware.Interrupts;
 
 import org.apache.log4j.Logger;
 
@@ -40,11 +44,11 @@ public class Kernel_Library extends HLEModule {
      * @returns The current state of the interrupt controller, to be used with ::sceKernelCpuResumeIntr().
      */
     @HLEFunction(nid = 0x092968F4, version = 150)
-    public int sceKernelCpuSuspendIntr() {
+    public int sceKernelCpuSuspendIntr(Processor processor) {
         int returnValue;
-        if (Interrupts.isInterruptsEnabled()) {
+        if (processor.isInterruptsEnabled()) {
         	returnValue = flagInterruptsEnabled;
-            Interrupts.disableInterrupts();
+        	processor.disableInterrupts();
         } else {
         	returnValue = flagInterruptsDisabled;
         }
@@ -52,11 +56,11 @@ public class Kernel_Library extends HLEModule {
         return returnValue;
     }
 
-    protected void hleKernelCpuResumeIntr(int flagInterrupts) {
+    protected void hleKernelCpuResumeIntr(Processor processor, int flagInterrupts) {
         if (flagInterrupts == flagInterruptsEnabled) {
-        	Interrupts.enableInterrupts();
+        	processor.enableInterrupts();
         } else if (flagInterrupts == flagInterruptsDisabled) {
-        	Interrupts.disableInterrupts();
+        	processor.disableInterrupts();
         } else {
         	log.warn(String.format("hleKernelCpuResumeIntr unknown flag value 0x%X", flagInterrupts));
         }
@@ -68,8 +72,8 @@ public class Kernel_Library extends HLEModule {
      * @param flags - The value returned from ::sceKernelCpuSuspendIntr().
      */
     @HLEFunction(nid = 0x5F10D406, version = 150)
-    public void sceKernelCpuResumeIntr(int flagInterrupts) {
-    	hleKernelCpuResumeIntr(flagInterrupts);
+    public void sceKernelCpuResumeIntr(Processor processor, int flagInterrupts) {
+    	hleKernelCpuResumeIntr(processor, flagInterrupts);
     }
 
     /**
@@ -78,8 +82,8 @@ public class Kernel_Library extends HLEModule {
      * @param flags - The value returned from ::sceKernelCpuSuspendIntr()
      */
     @HLEFunction(nid = 0x3B84732D, version = 150)
-    public void sceKernelCpuResumeIntrWithSync(int flagInterrupts) {
-    	hleKernelCpuResumeIntr(flagInterrupts);
+    public void sceKernelCpuResumeIntrWithSync(Processor processor, int flagInterrupts) {
+    	hleKernelCpuResumeIntr(processor, flagInterrupts);
     }
 
     /**
@@ -100,11 +104,11 @@ public class Kernel_Library extends HLEModule {
      * @returns 1 if interrupts are currently enabled.
      */
     @HLEFunction(nid = 0xB55249D2, version = 150)
-    public boolean sceKernelIsCpuIntrEnable() {
-        return Interrupts.isInterruptsEnabled();
+    public boolean sceKernelIsCpuIntrEnable(Processor processor) {
+        return processor.isInterruptsEnabled();
     }
 
-	@HLEFunction(nid = 0x15B6446B, version = 380, checkInsideInterrupt = true)
+	@HLEFunction(nid = 0x15B6446B, version = 150, checkInsideInterrupt = true)
 	public int sceKernelUnlockLwMutex(TPointer workAreaAddr, int count) {
 		return Managers.lwmutex.sceKernelUnlockLwMutex(workAreaAddr, count);
 	}
@@ -114,7 +118,7 @@ public class Kernel_Library extends HLEModule {
 		return Managers.lwmutex.sceKernelLockLwMutexCB(workAreaAddr, count, timeoutAddr);
 	}
 
-	@HLEFunction(nid = 0xBEA46419, version = 380, checkInsideInterrupt = true)
+	@HLEFunction(nid = 0xBEA46419, version = 150, checkInsideInterrupt = true)
 	public int sceKernelLockLwMutex(TPointer workAreaAddr, int count, @CanBeNull TPointer32 timeoutAddr) {
 		return Managers.lwmutex.sceKernelLockLwMutex(workAreaAddr, count, timeoutAddr);
 	}
@@ -134,14 +138,22 @@ public class Kernel_Library extends HLEModule {
 		return Managers.lwmutex.sceKernelTryLockLwMutex(workAreaAddr, count);
 	}
 
-    @HLEFunction(nid = 0x1839852A, version = 380)
-    public int sceKernelMemcpy(TPointer dst, TPointer src, int length) {
+    @HLELogging(level="trace")
+    @HLEFunction(nid = 0x1839852A, version = 150)
+    public int sceKernelMemcpy(@BufferInfo(lengthInfo=LengthInfo.nextNextParameter, usage=Usage.out) TPointer dst, @BufferInfo(lengthInfo=LengthInfo.nextParameter, usage=Usage.in) TPointer src, int length) {
     	if (dst.getAddress() != src.getAddress()) {
     		dst.getMemory().memcpyWithVideoCheck(dst.getAddress(), src.getAddress(), length);
     	}
 
 		return dst.getAddress();
 	}
+
+    @HLEFunction(nid = 0xA089ECA4, version = 150)
+    public int sceKernelMemset(TPointer destAddr, int data, int size) {
+        destAddr.memset((byte) data, size);
+
+        return 0;
+    }
 
     @HLEFunction(nid = 0xFA835CDE, version = 620)
 	public int sceKernel_FA835CDE(int uid) {

@@ -53,6 +53,7 @@ public class sceUsb extends HLEModule {
 	protected boolean usbActivated = false;
 	protected boolean usbStarted = false;
 	protected HashMap<String, SceModule> loadedModules;
+	protected int callbackId = -1;
 
 	@Override
 	public void start() {
@@ -85,6 +86,12 @@ public class sceUsb extends HLEModule {
 		return (state & waitState) != 0;
 	}
 
+	protected void notifyCallback() {
+		if (callbackId >= 0) {
+			Modules.ThreadManForUserModule.hleKernelNotifyCallback(SceKernelThreadInfo.THREAD_CALLBACK_USB, getUsbState());
+		}
+	}
+
 	/**
 	 * Start a USB driver.
 	 *
@@ -106,6 +113,8 @@ public class sceUsb extends HLEModule {
 			SceModule module = Managers.modules.getModuleByUID(sceModuleId);
 			loadedModules.put(driverName, module);
 		}
+
+		notifyCallback();
 
 		return 0;
 	}
@@ -129,6 +138,8 @@ public class sceUsb extends HLEModule {
 			HLEModuleManager moduleManager = HLEModuleManager.getInstance();
 			moduleManager.UnloadFlash0Module(module);
 		}
+
+		notifyCallback();
 
 		return 0;
 	}
@@ -176,9 +187,7 @@ public class sceUsb extends HLEModule {
 	 */
 	@HLEFunction(nid = 0x586DB82C, version = 150)
 	public int sceUsbActivate(int pid) {
-		usbActivated = true;
-
-		return 0;
+		return sceUsbActivateWithCharging(pid, false);
 	}
 
 	/**
@@ -191,6 +200,7 @@ public class sceUsb extends HLEModule {
 	@HLEFunction(nid = 0xC572A9C8, version = 150)
 	public int sceUsbDeactivate(int pid) {
 		usbActivated = false;
+		notifyCallback();
 
 		return 0;
 	}
@@ -228,6 +238,45 @@ public class sceUsb extends HLEModule {
 	@HLEUnimplemented
 	@HLEFunction(nid = 0x1C360735, version = 150)
 	public int sceUsbWaitCancel() {
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x8BFC3DE8, version = 150)
+	public int sceUsb_8BFC3DE8(int callbackId, int unknown1, int unknown2) {
+		// Registering a callback?
+		if (Modules.ThreadManForUserModule.hleKernelRegisterCallback(SceKernelThreadInfo.THREAD_CALLBACK_USB, callbackId)) {
+			this.callbackId = callbackId;
+			notifyCallback();
+		}
+
+    	return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x89DE0DC5, version = 150)
+	public int sceUsb_89DE0DC5(int callbackId) {
+		// Unregistering a callback?
+		if (this.callbackId == callbackId) {
+			this.callbackId = -1;
+		}
+
+		return 0;
+	}
+
+	/**
+	 * Activate a USB driver.
+	 *
+	 * @param pid      - Product ID for the default USB Driver
+	 * @param charging - charging the PSP while the USB is connected?
+	 *
+	 * @return 0 on success
+	 */
+	@HLEFunction(nid = 0xE20B23A6, version = 150)
+	public int sceUsbActivateWithCharging(int pid, boolean charging) {
+		usbActivated = true;
+		notifyCallback();
+
 		return 0;
 	}
 }

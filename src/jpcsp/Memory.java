@@ -16,6 +16,8 @@
  */
 package jpcsp;
 
+import static jpcsp.Allegrex.compiler.RuntimeContext.getPc;
+
 import java.io.File;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
@@ -44,10 +46,10 @@ public abstract class Memory {
     public static boolean useNativeMemory = false;
     public static boolean useDirectBufferMemory = false;
     public static boolean useSafeMemory = true;
-    public static final int addressMask = 0x3FFFFFFF;
+    public static final int addressMask = 0x1FFFFFFF;
     private boolean ignoreInvalidMemoryAccess = false;
     protected static final int MEMORY_PAGE_SHIFT = 12;
-    protected static boolean[] validMemoryPage = new boolean[0x00100000];
+    protected static final boolean[] validMemoryPage = new boolean[1 << (Integer.SIZE - MEMORY_PAGE_SHIFT)];
     // Assume that a video check during a memcpy is only necessary
     // when copying at least one screen row (at 2 bytes per pixel).
     private static final int MINIMUM_LENGTH_FOR_VIDEO_CHECK = Screen.width * 2;
@@ -67,9 +69,16 @@ public abstract class Memory {
             // 2) StandardMemory when available memory is not sufficient for 1st choice
             //
 
+        	boolean useDebuggerMemory = false;
+            if (Settings.getInstance().readBool("emu.useDebuggerMemory") || new File(DebuggerMemory.mBrkFilePath).exists()) {
+            	useDebuggerMemory = true;
+            	// Always use the safe memory when using the debugger memory
+            	useSafeMemory = true;
+            }
+
             // Disable address checking when the option
             // "ignoring invalid memory access" is selected.
-            if (Settings.getInstance().readBool("emu.ignoreInvalidMemoryAccess")) {
+            if (Settings.getInstance().readBool("emu.ignoreInvalidMemoryAccess") && !useDebuggerMemory) {
                 useSafeMemory = false;
             }
 
@@ -133,11 +142,13 @@ public abstract class Memory {
                 throw new OutOfMemoryError("Cannot allocate memory");
             }
 
-            if (Settings.getInstance().readBool("emu.useDebuggerMemory") || new File(DebuggerMemory.mBrkFilePath).exists()) {
+            if (useDebuggerMemory) {
                 DebuggerMemory.install();
             }
 
-            log.debug("Using " + instance.getClass().getName());
+            if (log.isDebugEnabled()) {
+            	log.debug(String.format("Using %s", instance.getClass().getName()));
+            }
         }
 
         return instance;
@@ -160,7 +171,7 @@ public abstract class Memory {
     }
 
     public void invalidMemoryAddress(int address, String prefix, int status) {
-        String message = String.format("%s - Invalid memory address: 0x%08X PC=0x%08X", prefix, address, Emulator.getProcessor().cpu.pc);
+        String message = String.format("%s - Invalid memory address: 0x%08X PC=0x%08X", prefix, address, getPc());
 
         if (ignoreInvalidMemoryAccess) {
             log.warn("IGNORED: " + message);
@@ -171,7 +182,7 @@ public abstract class Memory {
     }
 
     public void invalidMemoryAddress(int address, int length, String prefix, int status) {
-        String message = String.format("%s - Invalid memory address: 0x%08X-0x%08X(length=0x%X) PC=0x%08X", prefix, address, address + length, length, Emulator.getProcessor().cpu.pc);
+        String message = String.format("%s - Invalid memory address: 0x%08X-0x%08X(length=0x%X) PC=0x%08X", prefix, address, address + length, length, getPc());
 
         if (ignoreInvalidMemoryAccess) {
             log.warn("IGNORED: " + message);
@@ -378,6 +389,10 @@ public abstract class Memory {
         memcpy(destination, source, length, true);
     }
 
+    public int normalize(int address) {
+    	return address & addressMask;
+    }
+
     public static int normalizeAddress(int address) {
         address &= addressMask;
 
@@ -401,7 +416,7 @@ public abstract class Memory {
         return ignoreInvalidMemoryAccess;
     }
 
-    private void setIgnoreInvalidMemoryAccess(boolean ignoreInvalidMemoryAccess) {
+    public void setIgnoreInvalidMemoryAccess(boolean ignoreInvalidMemoryAccess) {
         this.ignoreInvalidMemoryAccess = ignoreInvalidMemoryAccess;
         log.info(String.format("Ignore invalid memory access: %b", ignoreInvalidMemoryAccess));
     }

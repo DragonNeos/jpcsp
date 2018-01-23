@@ -66,6 +66,56 @@ public class UmdBrowser extends javax.swing.JDialog {
     private static final long serialVersionUID = 7788144302296106541L;
     private static Logger log = Emulator.log;
 
+    public static class UmdFileFilter implements FileFilter {
+        @Override
+        public boolean accept(File file) {
+            String lower = file.getName().toLowerCase();
+            if (lower.endsWith(".cso") || lower.endsWith(".iso")) {
+                return true;
+            }
+            if (file.isDirectory()) {
+                File eboot[] = file.listFiles(new FileFilter() {
+                    @Override
+                    public boolean accept(File file) {
+                        return file.getName().equalsIgnoreCase("eboot.pbp");
+                    }
+                });
+                if (eboot.length != 1) {
+                	return false;
+                }
+
+                // Basic sanity checks on EBOOT.PBP
+                DataInputStream is = null;
+                try {
+					is = new DataInputStream(new FileInputStream(eboot[0]));
+					byte[] header = new byte[0x24];
+					int length = is.read(header);
+					if (length != header.length) {
+						return false;
+					}
+					// PBP header?
+					if (header[0] != 0 || header[1] != 'P' || header[2] != 'B' || header[3] != 'P') {
+						return false;
+					}
+				} catch (IOException e) {
+					return false;
+				} finally {
+					if (is != null) {
+						try {
+							is.close();
+						} catch (IOException e) {
+							// Ignore exception
+						}
+					}
+				}
+
+                // Valid EBOOT.PBP
+                return true;
+            }
+            return false;
+        }
+    }
+
     private final class MemStickTableModel extends AbstractTableModel {
 
         private static final long serialVersionUID = -1675488447176776560L;
@@ -89,56 +139,8 @@ public class UmdBrowser extends javax.swing.JDialog {
                     pathPrefix = path.getPath();
                 }
 
-                File[] pathPrograms = path.listFiles(new FileFilter() {
-                    @Override
-                    public boolean accept(File file) {
-                        String lower = file.getName().toLowerCase();
-                        if (lower.endsWith(".cso") || lower.endsWith(".iso")) {
-                            return true;
-                        }
-                        if (file.isDirectory()) {
-                            File eboot[] = file.listFiles(new FileFilter() {
-                                @Override
-                                public boolean accept(File file) {
-                                    return file.getName().equalsIgnoreCase("eboot.pbp");
-                                }
-                            });
-                            if (eboot.length != 1) {
-                            	return false;
-                            }
+                File[] pathPrograms = path.listFiles(new UmdFileFilter());
 
-                            // Basic sanity checks on EBOOT.PBP
-                            DataInputStream is = null;
-                            try {
-								is = new DataInputStream(new FileInputStream(eboot[0]));
-								byte[] header = new byte[0x24];
-								int length = is.read(header);
-								if (length != header.length) {
-									return false;
-								}
-								// PBP header?
-								if (header[0] != 0 || header[1] != 'P' || header[2] != 'B' || header[3] != 'P') {
-									return false;
-								}
-							} catch (IOException e) {
-								return false;
-							} finally {
-								if (is != null) {
-									try {
-										is.close();
-									} catch (IOException e) {
-										// Ignore exception
-									}
-								}
-							}
-
-                            // Valid EBOOT.PBP
-                            return true;
-                        }
-                        return false;
-                    }
-                });
-                
                 programList.addAll(Arrays.asList(pathPrograms));
             }
 
@@ -507,6 +509,8 @@ public class UmdBrowser extends javax.swing.JDialog {
         }
 
         umdInfoLoaded[rowIndex] = true;
+
+        updateFilteredItem(rowIndex);
     }
     
     private void onSelectionChanged(ListSelectionEvent event) {
@@ -669,42 +673,83 @@ public class UmdBrowser extends javax.swing.JDialog {
     	return text.contains(filter);
     }
 
-    private void filterItems(String filter) {
+    private boolean filterItems(String filter) {
+    	synchronized (filteredItems) {
+        	numberFilteredItems = 0;
+
+        	for (int rowIndex = 0; rowIndex < programs.length; rowIndex++) {
+        		filterItem(filter, rowIndex);
+        	}
+		}
+
+    	return true;
+    }
+
+    private String getFilter() {
+    	String filter = filterField.getText();
     	filter = filter.trim().toLowerCase();
 
-    	filteredItems = new int[programs.length];
-    	numberFilteredItems = 0;
+    	return filter;
+    }
 
-    	for (int rowIndex = 0; rowIndex < programs.length; rowIndex++) {
-    		waitForUmdInfoLoaded(rowIndex);
+    private void updateFilteredItem(int rowIndex) {
+    	boolean alreadyPresent = false;
+    	for (int i = 0; i < numberFilteredItems; i++) {
+    		if (filteredItems[i] == rowIndex) {
+    			alreadyPresent = true;
+    			break;
+    		}
+    	}
 
-    		boolean show = false;
+    	boolean modified = false;
+    	if (!alreadyPresent) {
+    		String filter = getFilter();
+	    	synchronized (filteredItems) {
+	    		modified = filterItem(filter, rowIndex);
+	    	}
+    	}
+
+    	if (modified) {
+        	((AbstractTableModel) table.getModel()).fireTableDataChanged();
+    	}
+    }
+
+    private boolean filterItem(String filter, int rowIndex) {
+		boolean show = false;
+
+		if (umdInfoLoaded[rowIndex]) {
     		try {
         		String title = getTitle(rowIndex);
         		String discId = getDiscId(rowIndex);
 				String programPath = getProgramPath(rowIndex);
+				String firmware = getFirmware(rowIndex);
 
-				if (filter(filter, title) || filter(filter, discId) || filter(filter, programPath)) {
+				if (filter(filter, title) || filter(filter, discId) || filter(filter, programPath) || filter(filter, firmware)) {
 					show = true;
 				}
     		} catch (IOException e) {
 				show = true;
 			}
+		}
 
-    		if (show) {
-    			filteredItems[numberFilteredItems] = rowIndex;
-    			numberFilteredItems++;
-    		}
-    	}
+		if (show) {
+			filteredItems[numberFilteredItems] = rowIndex;
+			numberFilteredItems++;
+		}
+
+		return show;
     }
 
     private void onFilterChanged() {
-    	String filter = filterField.getText();
-    	log.info(String.format("onFilterChanged '%s'", filter));
+    	String filter = getFilter();
 
-    	filterItems(filter);
+    	if (log.isDebugEnabled()) {
+    		log.debug(String.format("onFilterChanged '%s'", filter));
+    	}
 
-    	((AbstractTableModel) table.getModel()).fireTableDataChanged();
+    	if (filterItems(filter)) {
+    		((AbstractTableModel) table.getModel()).fireTableDataChanged();
+    	}
     }
 
     private int getSelectedRowIndex() {
@@ -725,9 +770,8 @@ public class UmdBrowser extends javax.swing.JDialog {
             setVisible(false);
             dispose();
         } else {
-            gui.loadUMD(selectedFile);
+            gui.loadAndRunUMD(selectedFile);
             dispose();
-            gui.loadAndRun();
         }
     }
 

@@ -62,7 +62,7 @@ public class KDebugForKernel extends HLEModule {
 
 	@HLEFunction(nid = 0x84F370BC, version = 150)
 	public int Kprintf(CpuState cpu, PspString formatString) {
-		return Modules.SysMemUserForUserModule.hleKernelPrintf(cpu, formatString, kprintf, "Kprintf");
+		return Modules.SysMemUserForUserModule.hleKernelPrintf(cpu, formatString, kprintf);
 	}
 
     @HLEUnimplemented
@@ -103,7 +103,7 @@ public class KDebugForKernel extends HLEModule {
 
     @HLEUnimplemented
 	@HLEFunction(nid = 0x24C32559, version = 150)
-	public int sceKernelDipsw() {
+	public int sceKernelDipsw(int unknown) {
 		return 0;
 	}
 
@@ -152,6 +152,61 @@ public class KDebugForKernel extends HLEModule {
     @HLEUnimplemented
 	@HLEFunction(nid = 0xB7251823, version = 150)
 	public int KDebugForKernel_B7251823() {
+		return 0;
+	}
+
+    @HLEUnimplemented
+	@HLEFunction(nid = 0x47570AC5, version = 150)
+	public int sceKernelIsToolMode() {
+		return 0;
+	}
+
+	@HLEFunction(nid = 0x27B23800, version = 150)
+	public boolean sceKernelIsUMDMode() {
+		return !sceKernelIsDVDMode();
+	}
+
+	@HLEFunction(nid = 0xB41E2430, version = 150)
+	public boolean sceKernelIsDVDMode() {
+		return false;
+	}
+
+    @HLEUnimplemented
+	@HLEFunction(nid = 0x86010FCB, version = 150)
+	public int sceKernelDipsw_660(int unknown) {
+		return sceKernelDipsw(unknown);
+	}
+
+    @HLEUnimplemented
+	@HLEFunction(nid = 0xACF427DC, version = 150)
+	public int sceKernelIsDevelopmentToolMode() {
+		return 0;
+	}
+
+    @HLEUnimplemented
+	@HLEFunction(nid = 0xF339073C, version = 150)
+	public int sceKernelDeci2pReferOperations() {
+		return 0;
+	}
+
+    @HLEUnimplemented
+	@HLEFunction(nid = 0x6CB0BDA4, version = 150)
+	public int sceKernelDipswHigh32() {
+    	// Has no parameters
+		return 0;
+	}
+
+    @HLEUnimplemented
+	@HLEFunction(nid = 0x43F0F8AB, version = 150)
+	public int sceKernelDipswLow32() {
+    	// Has no parameters
+		return 0;
+	}
+
+    @HLEUnimplemented
+	@HLEFunction(nid = 0x568DCD25, version = 150)
+	public int sceKernelDipswCpTime() {
+    	// Has no parameters
 		return 0;
 	}
 }

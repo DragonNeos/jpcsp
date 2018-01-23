@@ -16,6 +16,9 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.Allegrex.compiler;
 
+import static jpcsp.Memory.addressMask;
+import static jpcsp.util.Utilities.addAddressHex;
+import static jpcsp.util.Utilities.addHex;
 import static jpcsp.util.Utilities.sleep;
 
 import java.util.ArrayList;
@@ -32,6 +35,7 @@ import jpcsp.Memory;
 import jpcsp.MemoryMap;
 import jpcsp.Processor;
 import jpcsp.State;
+import jpcsp.Allegrex.Common;
 import jpcsp.Allegrex.CpuState;
 import jpcsp.Allegrex.Decoder;
 import jpcsp.Allegrex.Instructions;
@@ -42,10 +46,12 @@ import jpcsp.HLE.SyscallHandler;
 import jpcsp.HLE.kernel.managers.IntrManager;
 import jpcsp.HLE.kernel.types.SceKernelThreadInfo;
 import jpcsp.HLE.modules.ThreadManForUser;
+import jpcsp.HLE.modules.reboot;
 import jpcsp.HLE.modules.sceDisplay;
-import jpcsp.hardware.Interrupts;
+import jpcsp.mediaengine.MEProcessor;
 import jpcsp.memory.DebuggerMemory;
 import jpcsp.memory.FastMemory;
+import jpcsp.memory.mmio.MMIOHandlerDisplayController;
 import jpcsp.scheduler.Scheduler;
 import jpcsp.settings.AbstractBoolSettingsListener;
 import jpcsp.settings.Settings;
@@ -54,6 +60,7 @@ import jpcsp.util.DurationStatistics;
 import jpcsp.util.Utilities;
 
 import org.apache.log4j.Logger;
+import org.apache.log4j.MDC;
 
 /**
  * @author gid15
@@ -71,9 +78,11 @@ public class RuntimeContext {
 	public  static Memory memory;
 	public  static       boolean enableDebugger = true;
 	public  static final String debuggerName = "syncDebugger";
-	public  static final boolean debugCodeBlockCalls = false;
+	public  static       boolean debugCodeBlockCalls = false;
 	public  static final String debugCodeBlockStart = "debugCodeBlockStart";
 	public  static final String debugCodeBlockEnd = "debugCodeBlockEnd";
+	private static final int debugCodeBlockNumberOfParameters = 6;
+	private static final Map<Integer, Integer> debugCodeBlocks = new HashMap<Integer, Integer>();
 	public  static final boolean debugCodeInstruction = false;
 	public  static final String debugCodeInstructionName = "debugCodeInstruction";
 	public  static final boolean debugMemoryRead = false;
@@ -115,6 +124,9 @@ public class RuntimeContext {
 	private static RuntimeSyncThread runtimeSyncThread = null;
 	private static RuntimeThread syscallRuntimeThread;
 	private static sceDisplay sceDisplayModule;
+	private static final Object idleSyncObject = new Object();
+	public static int firmwareVersion;
+	private static boolean isHomebrew = false;
 
 	private static class CompilerEnabledSettingsListerner extends AbstractBoolSettingsListener {
 		@Override
@@ -143,7 +155,7 @@ public class RuntimeContext {
         IExecutable executable = getExecutable(address);
         if (executable == null) {
             // TODO Return to interpreter
-            log.error("RuntimeContext.jumpCall - Cannot find executable");
+            log.error("jumpCall - Cannot find executable");
             throw new RuntimeException("Cannot find executable");
         }
 
@@ -180,7 +192,7 @@ public class RuntimeContext {
 		}
 
 		if (debugCodeBlockCalls && log.isDebugEnabled()) {
-        	log.debug(String.format("RuntimeContext.jumpCall returning 0x%08X", returnValue));
+        	log.debug(String.format("jumpCall returning 0x%08X", returnValue));
         }
 
         return returnValue;
@@ -188,18 +200,18 @@ public class RuntimeContext {
 
 	public static void jump(int address, int returnAddress) throws Exception {
 		if (debugCodeBlockCalls && log.isDebugEnabled()) {
-			log.debug(String.format("RuntimeContext.jump starting address=0x%08X, returnAddress=0x%08X, $sp=0x%08X", address, returnAddress, cpu._sp));
+			log.debug(String.format("jump starting address=0x%08X, returnAddress=0x%08X, $sp=0x%08X", address, returnAddress, cpu._sp));
 		}
 
 		int sp = cpu._sp;
-		while (address != returnAddress) {
+		while ((address & addressMask) != (returnAddress & addressMask)) {
 			try {
 				address = jumpCall(address);
 			} catch (StackPopException e) {
 				if (log.isDebugEnabled()) {
-					log.debug(String.format("jumpCall catching StackPopException 0x%08X with $sp=0x%08X, start $sp=0x%08X", e.getRa(), cpu._sp, sp));
+					log.debug(String.format("jump catching StackPopException 0x%08X with $sp=0x%08X, start $sp=0x%08X", e.getRa(), cpu._sp, sp));
 				}
-				if (e.getRa() != returnAddress) {
+				if ((e.getRa() & addressMask) != (returnAddress & addressMask)) {
 					throw e;
 				}
 				break;
@@ -207,13 +219,13 @@ public class RuntimeContext {
 		}
 
 		if (debugCodeBlockCalls && log.isDebugEnabled()) {
-			log.debug(String.format("RuntimeContext.jump returning address=0x%08X, returnAddress=0x%08X, $sp=0x%08X", address, returnAddress, cpu._sp));
+			log.debug(String.format("jump returning address=0x%08X, returnAddress=0x%08X, $sp=0x%08X", address, returnAddress, cpu._sp));
 		}
 	}
 
     public static int call(int address) throws Exception {
 		if (debugCodeBlockCalls && log.isDebugEnabled()) {
-			log.debug(String.format("RuntimeContext.call address=0x%08X", address));
+			log.debug(String.format("call address=0x%08X, $ra=0x%08X", address, cpu._ra));
 		}
         int returnValue = jumpCall(address);
 
@@ -222,22 +234,39 @@ public class RuntimeContext {
 
 	public static int executeInterpreter(int address) throws Exception {
 		if (debugCodeBlockCalls && log.isDebugEnabled()) {
-			log.debug(String.format("RuntimeContext.executeInterpreter address=0x%08X", address));
+			log.debug(String.format("executeInterpreter address=0x%08X", address));
+		}
+
+		boolean useMMIO = false;
+		if (!Memory.isAddressGood(address)) {
+			Memory mmio = RuntimeContextLLE.getMMIO();
+			if (mmio != null) {
+				useMMIO = true;
+				cpu.setMemory(mmio);
+			}
 		}
 
 		boolean interpret = true;
 		cpu.pc = address;
 		int returnValue = 0;
 		while (interpret) {
-			int opcode = cpu.fetchOpcode();
-			Instruction insn = Decoder.instruction(opcode);
-			insn.interpret(processor, opcode);
+			Instruction insn = processor.interpret();
 			if (insn.hasFlags(Instruction.FLAG_STARTS_NEW_BLOCK)) {
+				if (useMMIO) {
+					cpu.setMemory(memory);
+				}
 				cpu.pc = jumpCall(cpu.pc);
+				if (useMMIO) {
+					cpu.setMemory(RuntimeContextLLE.getMMIO());
+				}
 			} else if (insn.hasFlags(Instruction.FLAG_ENDS_BLOCK) && !insn.hasFlags(Instruction.FLAG_IS_CONDITIONAL)) {
 				interpret = false;
 				returnValue = cpu.pc;
 			}
+		}
+
+		if (useMMIO) {
+			cpu.setMemory(memory);
 		}
 
 		return returnValue;
@@ -248,25 +277,92 @@ public class RuntimeContext {
 		execute(insn, opcode);
 	}
 
-	public static void debugCodeBlockStart(int address) {
-    	if (log.isDebugEnabled()) {
-    		String comment = "";
-    		int syscallAddress = address + 4;
-    		if (Memory.isAddressGood(syscallAddress)) {
-        		int syscallOpcode = memory.read32(syscallAddress);
-        		Instruction syscallInstruction = Decoder.instruction(syscallOpcode);
-        		if (syscallInstruction == Instructions.SYSCALL) {
-            		String syscallDisasm = syscallInstruction.disasm(syscallAddress, syscallOpcode);
-        			comment = syscallDisasm.substring(19);
-        		}
+	private static String getDebugCodeBlockStart(CpuState cpu, int address) {
+		// Do not build the string using "String.format()" for improved performance of this time-critical function
+		StringBuilder s = new StringBuilder("Starting CodeBlock 0x");
+		addAddressHex(s, address);
+
+		int syscallAddress = address + 4;
+		if (Memory.isAddressGood(syscallAddress)) {
+    		int syscallOpcode = cpu.memory.read32(syscallAddress);
+    		Instruction syscallInstruction = Decoder.instruction(syscallOpcode);
+    		if (syscallInstruction == Instructions.SYSCALL) {
+        		String syscallDisasm = syscallInstruction.disasm(syscallAddress, syscallOpcode);
+    			s.append(syscallDisasm.substring(19));
     		}
-    		log.debug(String.format("Starting CodeBlock 0x%08X%s, $ra=0x%08X, $sp=0x%08X", address, comment, cpu._ra, cpu._sp));
+		}
+
+		int numberOfParameters = debugCodeBlockNumberOfParameters;
+		if (!debugCodeBlocks.isEmpty()) {
+			Integer numberOfParametersValue = debugCodeBlocks.get(address);
+			if (numberOfParametersValue != null) {
+				numberOfParameters = numberOfParametersValue.intValue();
+			}
+		}
+
+		if (numberOfParameters > 0) {
+			int maxRegisterParameters = Math.min(numberOfParameters, 8);
+			for (int i = 0; i < maxRegisterParameters; i++) {
+				int register = Common._a0 + i;
+				int parameterValue = cpu.getRegister(register);
+
+				s.append(", ");
+				s.append(Common.gprNames[register]);
+				s.append("=0x");
+				if (Memory.isAddressGood(parameterValue)) {
+					addAddressHex(s, parameterValue);
+				} else {
+					addHex(s, parameterValue);
+				}
+			}
+		}
+
+		s.append(", $ra=0x");
+		addAddressHex(s, cpu._ra);
+		s.append(", $sp=0x");
+		addAddressHex(s, cpu._sp);
+
+		return s.toString();
+	}
+
+	public static void debugCodeBlockStart(int address) {
+		if (!debugCodeBlocks.isEmpty() && debugCodeBlocks.containsKey(address)) {
+			if (log.isInfoEnabled()) {
+				log.info(getDebugCodeBlockStart(cpu, address));
+			}
+		} else if (log.isDebugEnabled()) {
+    		log.debug(getDebugCodeBlockStart(cpu, address));
+    	}
+    }
+
+	public static void debugCodeBlockStart(CpuState cpu, int address) {
+		if (!debugCodeBlocks.isEmpty() && debugCodeBlocks.containsKey(address)) {
+			if (log.isInfoEnabled()) {
+				log.info(getDebugCodeBlockStart(cpu, address));
+			}
+		} else if (log.isDebugEnabled()) {
+    		log.debug(getDebugCodeBlockStart(cpu, address));
     	}
     }
 
     public static void debugCodeBlockEnd(int address, int returnAddress) {
     	if (log.isDebugEnabled()) {
-    		log.debug(String.format("Returning from CodeBlock 0x%08X to 0x%08X, $sp=0x%08X", address, returnAddress, cpu._sp));
+    		debugCodeBlockEnd(cpu, address, returnAddress);
+    	}
+    }
+
+    public static void debugCodeBlockEnd(CpuState cpu, int address, int returnAddress) {
+    	if (log.isDebugEnabled()) {
+    		// Do not build the string using "String.format()" for improved performance of this time-critical function
+    		StringBuilder s = new StringBuilder("Returning from CodeBlock 0x");
+    		addAddressHex(s, address);
+    		s.append(" to 0x");
+    		addAddressHex(s, returnAddress);
+    		s.append(", $sp=0x");
+    		addAddressHex(s, cpu._sp);
+    		s.append(", $v0=0x");
+    		addAddressHex(s, cpu._v0);
+    		log.debug(s.toString());
     	}
     }
 
@@ -291,12 +387,7 @@ public class RuntimeContext {
         	runtimeSyncThread.start();
         }
 
-        memory = Emulator.getMemory();
-		if (memory instanceof FastMemory) {
-			memoryInt = ((FastMemory) memory).getAll();
-		} else {
-		    memoryInt = null;
-		}
+        updateMemory();
 
         if (State.debugger != null || (memory instanceof DebuggerMemory) || debugMemoryRead || debugMemoryWrite) {
         	enableDebugger = true;
@@ -308,8 +399,8 @@ public class RuntimeContext {
 
         sceDisplayModule = Modules.sceDisplayModule;
 
-        fastExecutableLookup = new IExecutable[(MemoryMap.END_USERSPACE - MemoryMap.START_USERSPACE + 1) >> 2];
-        fastCodeBlockLookup = new CodeBlockList[(MemoryMap.END_USERSPACE - MemoryMap.START_USERSPACE + 1) >> fastCodeBlockLookupShift];
+        fastExecutableLookup = new IExecutable[MemoryMap.SIZE_RAM >> 2];
+        fastCodeBlockLookup = new CodeBlockList[MemoryMap.SIZE_RAM >> fastCodeBlockLookupShift];
 
 		return true;
     }
@@ -361,21 +452,7 @@ public class RuntimeContext {
 		// Switch to the real active thread, even if it is an idle thread
 		switchRealThread(Modules.ThreadManForUserModule.getCurrentThread());
 
-		IExecutable executable = getExecutable(pc);
-        int newPc = 0;
-        int returnAddress = cpu._ra;
-        boolean callbackExited = false;
-		try {
-			execWithReturnAddress(executable, returnAddress);
-			newPc = returnAddress;
-		} catch (StopThreadException e) {
-			// Ignore exception
-		} catch (Exception e) {
-			log.error("Catched Throwable in executeCallback:", e);
-			callbackExited = true;
-		}
-    	cpu.pc = newPc;
-    	cpu.npc = newPc; // npc is used when context switching
+        boolean callbackExited = executeFunction(pc);
 
 		if (log.isDebugEnabled()) {
 			log.debug(String.format("End of Callback 0x%08X", pc));
@@ -399,6 +476,15 @@ public class RuntimeContext {
 		    fpr = processor.cpu.fpr;
 		    vprFloat = processor.cpu.vprFloat;
 		    vprInt = processor.cpu.vprInt;
+		}
+    }
+
+    public static void updateMemory() {
+        memory = Emulator.getMemory();
+		if (memory instanceof FastMemory) {
+			memoryInt = ((FastMemory) memory).getAll();
+		} else {
+		    memoryInt = null;
 		}
     }
 
@@ -468,35 +554,54 @@ public class RuntimeContext {
 
             log.debug("Starting Idle State...");
             idleDuration.start();
-            while (isIdle) {
-            	checkStoppedThread();
-            	{
-            		// Do not take the duration of sceDisplay into idleDuration
-            		idleDuration.end();
-            		syncEmulator(true);
-            		idleDuration.start();
-            	}
-                syncPause();
-                checkPendingCallbacks();
-                scheduler.step();
-                if (threadMan.isIdleThread(threadMan.getCurrentThread())) {
-                	threadMan.checkCallbacks();
-                	threadMan.hleRescheduleCurrentThread();
-                }
+			while (isIdle) {
+				checkStoppedThread();
+				{
+					// Do not take the duration of sceDisplay into idleDuration
+					idleDuration.end();
+					syncEmulator(true);
+					idleDuration.start();
+				}
+				syncPause();
+				checkPendingCallbacks();
+				scheduler.step();
+				if (threadMan.isIdleThread(threadMan.getCurrentThread())) {
+					threadMan.checkCallbacks();
+					threadMan.hleRescheduleCurrentThread();
+				}
 
-                if (isIdle) {
-                	long delay = scheduler.getNextActionDelay(idleSleepMicros);
-                	if (delay > 0) {
-                		int intDelay;
-	                	if (delay >= idleSleepMicros) {
-	                		intDelay = idleSleepMicros;
-	                	} else {
-	                		intDelay = (int) delay;
-	                	}
-                		sleep(intDelay / 1000, intDelay % 1000);
-                	}
-                }
-            }
+				if (isIdle) {
+					// While being idle, try to reduce the load on the host CPU
+					// by sleeping as much as possible.
+					// We can now sleep until the next scheduler action need to be executed.
+					//
+					// If the scheduler is receiving from another thread, a new action
+					// to be executed earlier, the wait state of this thread
+					// will be interrupted (see onNextScheduleModified()).
+					// This is for example the case when a GE list is ending (FINISH/SIGNAL + END)
+					// and a GE callback has to be executed immediately.
+					long delay = scheduler.getNextActionDelay(idleSleepMicros);
+					if (delay > 0) {
+						int intDelay;
+						if (delay >= idleSleepMicros) {
+							intDelay = idleSleepMicros;
+						} else {
+							intDelay = (int) delay;
+						}
+
+						try {
+							// Wait for intDelay milliseconds.
+							// The wait state will be terminated whenever the scheduler
+							// is receiving a new scheduler action (see onNextScheduleModified()).
+							synchronized (idleSyncObject) {
+								idleSyncObject.wait(intDelay / 1000, intDelay % 1000);
+							}
+						} catch (InterruptedException e) {
+							// Ignore exception
+						}
+					}
+				}
+			}
             idleDuration.end();
             log.debug("Ending Idle State");
         }
@@ -622,12 +727,12 @@ public class RuntimeContext {
     	do {
     		wantSync = false;
 
-	    	if (!IntrManager.getInstance().canExecuteInterruptNow()) {
+	    	if (!IntrManager.getInstance().canExecuteInterruptNow() && !RuntimeContextLLE.isLLEActive()) {
 	    		syncFast();
 	    	} else {
 		    	syncPause();
 				Emulator.getScheduler().step();
-				if (Interrupts.isInterruptsEnabled()) {
+				if (processor.isInterruptsEnabled()) {
 					Modules.ThreadManForUserModule.hleRescheduleCurrentThread();
 				}
 				syncThread();
@@ -667,16 +772,20 @@ public class RuntimeContext {
     	syncFast();
     }
 
-    public static void syscallFast(int code) {
+    public static int syscallFast(int code) throws Exception {
 		// Fast syscall: no context switching
-    	SyscallHandler.syscall(code);
+    	int continueAddress = SyscallHandler.syscall(code);
     	postSyscallFast();
+
+    	return continueAddress;
     }
 
-    public static void syscall(int code) throws StopThreadException {
+    public static int syscall(int code) throws Exception {
     	preSyscall();
-    	SyscallHandler.syscall(code);
+    	int continueAddress = SyscallHandler.syscall(code);
     	postSyscall();
+
+    	return continueAddress;
     }
 
     private static void execWithReturnAddress(IExecutable executable, int returnAddress) throws Exception {
@@ -697,7 +806,29 @@ public class RuntimeContext {
 		}
     }
 
+    public static boolean executeFunction(int address) {
+		IExecutable executable = getExecutable(address);
+        int newPc = 0;
+        int returnAddress = cpu._ra;
+        boolean exception = false;
+		try {
+			execWithReturnAddress(executable, returnAddress);
+			newPc = returnAddress;
+		} catch (StopThreadException e) {
+			// Ignore exception
+		} catch (Exception e) {
+			log.error("Catched Throwable in executeCallback:", e);
+			exception = true;
+		}
+    	cpu.pc = newPc;
+    	cpu.npc = newPc; // npc is used when context switching
+
+    	return exception;
+    }
+
     public static void runThread(RuntimeThread thread) {
+    	setLog4jMDC();
+
     	thread.setInSyscall(true);
 
     	if (isStoppedThread()) {
@@ -711,6 +842,8 @@ public class RuntimeContext {
 			// This thread has already been stopped before it is really starting...
     		return;
     	}
+
+    	thread.onThreadStart();
 
         ThreadManForUser threadMan = Modules.ThreadManForUserModule;
 
@@ -799,7 +932,7 @@ public class RuntimeContext {
 	    		// One code block has been deleted, recompute the whole code blocks range
 	    		computeCodeBlocksRange();
 
-	    		int fastExecutableLoopukIndex = (address - MemoryMap.START_USERSPACE) >> 2;
+	    		int fastExecutableLoopukIndex = (address - MemoryMap.START_RAM) >> 2;
 	    		if (fastExecutableLoopukIndex >= 0 && fastExecutableLoopukIndex < fastExecutableLookup.length) {
 	    			fastExecutableLookup[fastExecutableLoopukIndex] = null;
 	    		}
@@ -809,8 +942,8 @@ public class RuntimeContext {
 	    		codeBlocksHighestAddress = Math.max(codeBlocksHighestAddress, codeBlock.getHighestAddress());
 	    	}
 
-	    	int startIndex = (codeBlock.getLowestAddress() - MemoryMap.START_USERSPACE) >> fastCodeBlockLookupShift;
-    		int endIndex = (codeBlock.getHighestAddress() - MemoryMap.START_USERSPACE) >> fastCodeBlockLookupShift;
+	    	int startIndex = (codeBlock.getLowestAddress() - MemoryMap.START_RAM) >> fastCodeBlockLookupShift;
+    		int endIndex = (codeBlock.getHighestAddress() - MemoryMap.START_RAM) >> fastCodeBlockLookupShift;
     		for (int i = startIndex; i <= endIndex; i++) {
     			if (i >= 0 && i < fastCodeBlockLookup.length) {
     				CodeBlockList codeBlockList = fastCodeBlockLookup[i];
@@ -818,7 +951,7 @@ public class RuntimeContext {
     					if (previousCodeBlock != null) {
     						codeBlockList.remove(previousCodeBlock);
     					}
-    					int addr = (i << fastCodeBlockLookupShift) + MemoryMap.START_USERSPACE;
+    					int addr = (i << fastCodeBlockLookupShift) + MemoryMap.START_RAM;
     					int size = 1 << fastCodeBlockLookupShift;
     					if (codeBlock.isOverlappingWithAddressRange(addr, size)) {
     						codeBlockList.add(codeBlock);
@@ -842,8 +975,9 @@ public class RuntimeContext {
     }
 
     public static IExecutable getExecutable(int address) {
+    	int maskedAddress = address & addressMask;
     	// Check if we have already the executable in the fastExecutableLookup array
-		int fastExecutableLoopukIndex = (address - MemoryMap.START_USERSPACE) >> 2;
+		int fastExecutableLoopukIndex = (maskedAddress - MemoryMap.START_RAM) >> 2;
 		IExecutable executable;
 		if (fastExecutableLoopukIndex >= 0 && fastExecutableLoopukIndex < fastExecutableLookup.length) {
 			executable = fastExecutableLookup[fastExecutableLoopukIndex];
@@ -852,7 +986,7 @@ public class RuntimeContext {
 		}
 
 		if (executable == null) {
-	        CodeBlock codeBlock = getCodeBlock(address);
+	        CodeBlock codeBlock = getCodeBlock(maskedAddress);
 	        if (codeBlock == null) {
 	            executable = Compiler.getInstance().compile(address);
 	        } else {
@@ -1109,7 +1243,7 @@ public class RuntimeContext {
     }
 
     private static CodeBlockList fillFastCodeBlockList(int index) {
-		int startAddr = (index << fastCodeBlockLookupShift)  + MemoryMap.START_USERSPACE;
+		int startAddr = (index << fastCodeBlockLookupShift)  + MemoryMap.START_RAM;
 		int size = 1 << fastCodeBlockLookupShift;
 		if (log.isDebugEnabled()) {
 			log.debug(String.format("Creating new fastCodeBlockList for 0x%08X", startAddr));
@@ -1143,8 +1277,8 @@ public class RuntimeContext {
         	// Check if the code blocks located in the given range have to be invalidated
         	if (size == fastCodeBlockSize) {
         		// This is a fast track to avoid checking all the code blocks
-        		int startIndex = (addr - MemoryMap.START_USERSPACE) >> fastCodeBlockLookupShift;
-				int endIndex = (addr + size - MemoryMap.START_USERSPACE) >> fastCodeBlockLookupShift;
+        		int startIndex = (addr - MemoryMap.START_RAM) >> fastCodeBlockLookupShift;
+				int endIndex = (addr + size - MemoryMap.START_RAM) >> fastCodeBlockLookupShift;
 				if (startIndex >= 0 && endIndex <= fastCodeBlockLookup.length) {
 					for (int index = startIndex; index <= endIndex; index++) {
 	        			CodeBlockList codeBlockList = fastCodeBlockLookup[index];
@@ -1350,6 +1484,12 @@ public class RuntimeContext {
 
     public static void onNextScheduleModified() {
     	checkSync(false);
+
+    	// Notify the thread waiting on the idleSyncObject that
+    	// the scheduler has now received a new schedule.
+    	synchronized (idleSyncObject) {
+        	idleSyncObject.notifyAll();
+		}
     }
 
     private static void checkSync(boolean sleep) {
@@ -1379,12 +1519,148 @@ public class RuntimeContext {
     }
 
     public static void setIsHomebrew(boolean isHomebrew) {
-    	// Currently, nothing special to do for Homebrew's
+    	RuntimeContext.isHomebrew = isHomebrew;
+    }
+
+    public static boolean isHomebrew() {
+    	return isHomebrew;
     }
 
     public static void onCodeModification(int pc, int opcode) {
     	cpu.pc = pc;
     	log.error(String.format("Code instruction at 0x%08X has been modified, expected 0x%08X, current 0x%08X", pc, opcode, memory.read32(pc)));
     	Emulator.PauseEmuWithStatus(Emulator.EMU_STATUS_MEM_WRITE);
+    }
+
+    public static void debugMemory(int address, int length) {
+    	if (memory instanceof DebuggerMemory) {
+    		DebuggerMemory debuggerMemory = (DebuggerMemory) memory;
+    		debuggerMemory.addRangeReadWriteBreakpoint(address, address + length - 1);
+    	}
+    }
+
+    public static void debugCodeBlock(int address, int numberOfArguments) {
+    	if (debugCodeBlockCalls) {
+    		debugCodeBlocks.put(address, numberOfArguments);
+    	}
+    }
+
+    public static void setFirmwareVersion(int firmwareVersion) {
+    	RuntimeContext.firmwareVersion = firmwareVersion;
+    }
+
+    public static boolean hasMemoryInt() {
+    	return memoryInt != null;
+    }
+
+    public static boolean hasMemoryInt(int address) {
+    	return hasMemoryInt() && Memory.isAddressGood(address);
+    }
+
+    public static int[] getMemoryInt() {
+    	return memoryInt;
+    }
+
+    public static int getPc() {
+    	return Emulator.getProcessor().cpu.pc;
+    }
+
+    public static int executeEret() throws Exception {
+    	int epc = processor.cpu.doERET(processor);
+
+    	reboot.setLog4jMDC();
+		reboot.dumpAllThreads();
+
+    	return epc;
+    }
+
+    private static int haltCount = 0;
+    public static void executeHalt(Processor processor) throws StopThreadException {
+    	if (reboot.enableReboot) {
+    		// This playground implementation is related to the investigation
+    		// for the reboot process (flash0:/reboot.bin).
+    		if (processor.cp0.isMediaEngineCpu()) {
+				((MEProcessor) processor).halt();
+    		} else {
+    			if (log.isDebugEnabled()) {
+    				log.debug(String.format("Allegrex halt pendingInterruptIPbits=0x%X", RuntimeContextLLE.pendingInterruptIPbits));
+    			}
+	    		reboot.dumpAllThreads();
+	    		if (false) {
+	    			reboot.dumpAllModulesAndLibraries();
+	    		}
+
+	    		// Simulate an interrupt exception
+	    		switch (haltCount) {
+	    			case 0:
+	    				// The module_start of display_01g.prx is requiring at least one VBLANK interrupt
+	    				// as it is executing sceDisplayWaitVblankStart().
+	    				MMIOHandlerDisplayController.getInstance().triggerVblankInterrupt();
+	    				break;
+	    			case 1:
+	    				// The init callback (sub_00000B08 registered by sceKernelSetInitCallback())
+	    				// of display_01g.prx is requiring at least one VBLANK interrupt
+	    				// as it is executing sceDisplayWaitVblankStart().
+	    				MMIOHandlerDisplayController.getInstance().triggerVblankInterrupt();
+	    				break;
+	    			case 2:
+	    				// The thread SCE_VSH_GRAPHICS is calling sceDisplayWaitVblankStart().
+	    				MMIOHandlerDisplayController.getInstance().triggerVblankInterrupt();
+	    				break;
+	    			case 3:
+	    				// The thread SCE_VSH_GRAPHICS is calling a function from paf.prx waiting for a vblank.
+	    				MMIOHandlerDisplayController.setMaxVblankInterrupts(-1);
+	    				MMIOHandlerDisplayController.getInstance().triggerVblankInterrupt();
+	    				break;
+	    			default:
+	    				break;
+	    		}
+	    		haltCount++;
+
+	    		idle();
+    		}
+    	} else {
+        	log.error("Allegrex halt");
+    		Emulator.PauseEmuWithStatus(Emulator.EMU_STATUS_HALT);
+    	}
+    }
+
+    public static void idle() throws StopThreadException {
+    	if (log.isDebugEnabled()) {
+    		log.debug(String.format("idle wantSync=%b", wantSync));
+    	}
+
+		if (RuntimeContextLLE.isLLEActive()) {
+			if (!toBeStoppedThreads.isEmpty()) {
+				wantSync = true;
+			}
+			Emulator.getScheduler().step();
+		}
+
+		if (wantSync) {
+    		sync();
+    	} else {
+    		Utilities.sleep(1);
+    	}
+    }
+
+    public static void setLog4jMDC() {
+    	setLog4jMDC(Thread.currentThread().getName());
+    }
+
+    public static void setLog4jMDC(String threadName) {
+    	setLog4jMDC(threadName, 0);
+    }
+
+    public static void setLog4jMDC(String threadName, int threadUid) {
+		MDC.put("LLE-thread-name", threadName);
+
+		if (threadUid != 0) {
+			MDC.put("LLE-thread-uid", String.format("0x%X", threadUid));
+			MDC.put("LLE-thread", String.format("%s_0x%X", threadName, threadUid));
+		} else {
+			MDC.put("LLE-thread-uid", "");
+			MDC.put("LLE-thread", threadName);
+		}
     }
 }

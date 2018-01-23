@@ -135,19 +135,21 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
     public final static int THREAD_CALLBACK_MEMORYSTICK_FAT = 3;
     public final static int THREAD_CALLBACK_POWER = 4;
     public final static int THREAD_CALLBACK_EXIT = 5;
-    public final static int THREAD_CALLBACK_USER_DEFINED = 6;
-    public final static int THREAD_CALLBACK_SIZE = 7;
+    public final static int THREAD_CALLBACK_USB = 6;
+    public final static int THREAD_CALLBACK_USER_DEFINED = 7;
+    public final static int THREAD_CALLBACK_SIZE = 8;
     private RegisteredCallbacks[] registeredCallbacks;
     public Queue<Callback> pendingCallbacks = new LinkedList<Callback>();
     public Queue<IAction> pendingActions = new LinkedList<IAction>();
     // Used by sceKernelExtendThreadStack
-    private SysMemInfo extendedStackSysMemInfo;
+    private List<SysMemInfo> extendedStackSysMemInfos;
     public boolean preserveStack;
+    private IAction onThreadStartAction;
 
     public static class RegisteredCallbacks {
     	private int type;
-    	private List<SceKernelCallbackInfo> callbacks;
-    	private List<SceKernelCallbackInfo> readyCallbacks;
+    	private List<pspBaseCallback> callbacks;
+    	private List<pspBaseCallback> readyCallbacks;
     	// THREAD_CALLBACK_MEMORYSTICK and THREAD_CALLBACK_MEMORYSTICK_FAT have
     	// a maximum of 32 registered callbacks each.
     	// Don't know yet for the other types, assuming also 32.
@@ -157,17 +159,17 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
 
     	public RegisteredCallbacks(int type) {
     		this.type = type;
-    		callbacks = new LinkedList<SceKernelCallbackInfo>();
-    		readyCallbacks = new LinkedList<SceKernelCallbackInfo>();
+    		callbacks = new LinkedList<pspBaseCallback>();
+    		readyCallbacks = new LinkedList<pspBaseCallback>();
     	}
 
 		public boolean hasCallbacks() {
 			return !callbacks.isEmpty();
 		}
 
-		public SceKernelCallbackInfo getCallbackByUid(int cbid) {
-    		for (SceKernelCallbackInfo callback : callbacks) {
-    			if (callback.uid == cbid) {
+		public pspBaseCallback getCallbackInfoByUid(int cbid) {
+    		for (pspBaseCallback callback : callbacks) {
+    			if (callback.getUid() == cbid) {
     				return callback;
     			}
     		}
@@ -176,14 +178,14 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
 		}
 
 		public boolean hasCallback(int cbid) {
-			return getCallbackByUid(cbid) != null;
+			return getCallbackInfoByUid(cbid) != null;
     	}
 
-		public boolean hasCallback(SceKernelCallbackInfo callback) {
+		public boolean hasCallback(pspBaseCallback callback) {
 			return callbacks.contains(callback);
 		}
 
-		public boolean addCallback(SceKernelCallbackInfo callback) {
+		public boolean addCallback(pspBaseCallback callback) {
 			if (hasCallback(callback)) {
 				return true;
 			}
@@ -201,17 +203,17 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
 			return true;
 		}
 
-    	public void setCallbackReady(SceKernelCallbackInfo callback) {
+    	public void setCallbackReady(pspBaseCallback callback) {
     		if (hasCallback(callback) && !isCallbackReady(callback)) {
 				readyCallbacks.add(callback);
     		}
     	}
 
-    	public boolean isCallbackReady(SceKernelCallbackInfo callback) {
+    	public boolean isCallbackReady(pspBaseCallback callback) {
     		return readyCallbacks.contains(callback);
     	}
 
-    	public SceKernelCallbackInfo removeCallback(SceKernelCallbackInfo callback) {
+    	public pspBaseCallback removeCallback(pspBaseCallback callback) {
     		if (!callbacks.remove(callback)) {
     			return null;
     		}
@@ -221,7 +223,7 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
     		return callback;
     	}
 
-    	public SceKernelCallbackInfo getNextReadyCallback() {
+    	public pspBaseCallback getNextReadyCallback() {
     		if (readyCallbacks.isEmpty()) {
     			return null;
     		}
@@ -233,7 +235,7 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
     		return callbacks.size();
     	}
 
-    	public SceKernelCallbackInfo getCallbackByIndex(int index) {
+    	public pspBaseCallback getCallbackByIndex(int index) {
     		return callbacks.get(index);
     	}
 
@@ -326,6 +328,10 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
         }
         cpuContext._k0 = 0;
         cpuContext._k1 = 0;
+        if (isUserMode()) {
+        	cpuContext._k1 |= 0x100000;
+        }
+cpuContext._k1 |= 0x100000;
         int intNanValue = 0x7F800001;
         float nanValue = Float.intBitsToFloat(intNanValue);
         for (int i = Common._f31; i >= Common._f0; i--) {
@@ -456,21 +462,40 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
         freeExtendedStack();
     }
 
+    public void freeExtendedStack(SysMemInfo extendedStackSysMemInfo) {
+    	if (extendedStackSysMemInfos != null) {
+    		if (extendedStackSysMemInfos.remove(extendedStackSysMemInfo)) {
+    			Modules.SysMemUserForUserModule.free(extendedStackSysMemInfo);
+    		}
+
+    		if (extendedStackSysMemInfos.size() == 0) {
+    			extendedStackSysMemInfos = null;
+    		}
+    	}
+    }
+
     public void freeExtendedStack() {
-        if (extendedStackSysMemInfo != null) {
-        	Modules.SysMemUserForUserModule.free(extendedStackSysMemInfo);
-        	extendedStackSysMemInfo = null;
+        if (extendedStackSysMemInfos != null) {
+        	for (SysMemInfo extendedStackSysMemInfo : extendedStackSysMemInfos) {
+            	Modules.SysMemUserForUserModule.free(extendedStackSysMemInfo);
+        	}
+        	extendedStackSysMemInfos = null;
         }
     }
 
-    public int extendStack(int size) {
-    	extendedStackSysMemInfo = Modules.SysMemUserForUserModule.malloc(SysMemUserForUser.USER_PARTITION_ID, String.format("ThreadMan-ExtendedStack-0x%x-%s", uid, name), SysMemUserForUser.PSP_SMEM_High, size, 0);
+    public SysMemInfo extendStack(int size) {
+    	SysMemInfo extendedStackSysMemInfo = Modules.SysMemUserForUserModule.malloc(SysMemUserForUser.USER_PARTITION_ID, String.format("ThreadMan-ExtendedStack-0x%x-%s", uid, name), SysMemUserForUser.PSP_SMEM_High, size, 0);
+    	if (extendedStackSysMemInfos == null) {
+    		extendedStackSysMemInfos = new LinkedList<SysMemInfo>();
+    	}
+    	extendedStackSysMemInfos.add(extendedStackSysMemInfo);
 
-    	return extendedStackSysMemInfo.addr;
+    	return extendedStackSysMemInfo;
     }
 
     public int getStackAddr() {
-    	if (extendedStackSysMemInfo != null) {
+    	if (extendedStackSysMemInfos != null) {
+    		SysMemInfo extendedStackSysMemInfo = extendedStackSysMemInfos.get(extendedStackSysMemInfos.size() - 1);
         	return extendedStackSysMemInfo.addr;
     	}
 
@@ -517,6 +542,35 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
 
     public String getStatusName() {
         return getStatusName(status);
+    }
+
+    public static String getWaitName(int waitType) {
+        switch (waitType) {
+	    	case PSP_WAIT_NONE: return "None";
+	    	case PSP_WAIT_SLEEP: return "Sleep";
+	    	case PSP_WAIT_DELAY: return "Delay";
+	    	case PSP_WAIT_THREAD_END: return "ThreadEnd";
+	    	case PSP_WAIT_EVENTFLAG: return "EventFlag";
+	    	case PSP_WAIT_SEMA: return "Semaphore";
+	    	case PSP_WAIT_MUTEX: return "Mutex";
+	    	case PSP_WAIT_LWMUTEX: return "LwMutex";
+	    	case PSP_WAIT_MBX: return "Mbx";
+	    	case PSP_WAIT_VPL: return "Vpl";
+	    	case PSP_WAIT_FPL: return "Fpl";
+	    	case PSP_WAIT_MSGPIPE: return "MsgPipe";
+	    	case PSP_WAIT_EVENTHANDLER: return "EventHandler";
+	    	case PSP_WAIT_CALLBACK_DELETE: return "CallBackDelete";
+	    	case JPCSP_WAIT_IO: return "Io";
+	    	case JPCSP_WAIT_UMD: return "Umd";
+	    	case JPCSP_WAIT_GE_LIST: return "Ge List";
+	    	case JPCSP_WAIT_NET: return "Network";
+	    	case JPCSP_WAIT_AUDIO: return "Audio";
+	    	case JPCSP_WAIT_DISPLAY_VBLANK: return "Display Vblank";
+	    	case JPCSP_WAIT_CTRL: return "Ctrl";
+	    	case JPCSP_WAIT_USB: return "Usb";
+	    	case JPCSP_WAIT_VIDEO_DECODER: return "VideoDecoder";
+	    }
+        return String.format("Unknown waitType=%d", waitType);
     }
 
     public static String getWaitName(int waitType, int waitId, ThreadWaitInfo wait, int status) {
@@ -621,7 +675,11 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
     }
 
     public boolean isWaiting() {
-        return (status & PSP_THREAD_WAITING) != 0;
+        return isWaitingStatus(status);
+    }
+
+    public static boolean isWaitingStatus(int status) {
+    	return (status & PSP_THREAD_WAITING) != 0;
     }
 
     public boolean isWaitingForType(int waitType) {
@@ -696,6 +754,16 @@ public class SceKernelThreadInfo extends pspAbstractMemoryMappedStructureVariabl
     	}
 
     	return address >= stackAddr && address < (stackAddr + stackSize);
+    }
+
+    public void setOnThreadStartAction(IAction onThreadStartAction) {
+    	this.onThreadStartAction = onThreadStartAction;
+    }
+
+    public void onThreadStart() {
+    	if (onThreadStartAction != null) {
+    		onThreadStartAction.execute();
+    	}
     }
 
     @Override

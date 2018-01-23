@@ -1403,6 +1403,7 @@ public class VfpuState extends FpuState {
 
         setRegister(rt, getVprInt(m, c, r));
     }
+
     // VFPU2:MFVC
     public void doMFVC(int rt, int imm7) {
     	if (rt != 0) {
@@ -1481,11 +1482,12 @@ public class VfpuState extends FpuState {
                     break;
                 default:
                     // These values are not supported in Jpcsp
-                    doUNK("Unimplemented MFVC (rt=" + rt + ", imm7=" + imm7 + ")");
+                    doUNK(String.format("Unimplemented mfvc (rt=%s, imm7=%d)", Common.gprNames[rt], imm7));
                     break;
             }
     	}
     }
+
     // VFPU2:MTV
     public void doMTV(int rt, int imm7) {
         int r = (imm7 >> 5) & 3;
@@ -1555,6 +1557,12 @@ public class VfpuState extends FpuState {
                     value >>>= 1;
                 }
                 break;
+            case 4:
+            	// The value 0 is used by the PSP reboot code, other values are unknown
+            	if (value != 0) {
+                    doUNK(String.format("Unimplemented mtvc (rt=%s, imm7=%d, value=0x%X)", Common.gprNames[rt], imm7, value));
+            	}
+            	break;
             case 8: /* 136 - RCX0 */
                 rnd.setSeed(value);
                 break;
@@ -1569,7 +1577,7 @@ public class VfpuState extends FpuState {
                 break;
             default:
                 // These values are not supported in Jpcsp
-                doUNK("Unimplemented MTVC (rt=" + rt + ", imm7=" + imm7 + ", value=0x" + Integer.toHexString(value) + ")");
+                doUNK(String.format("Unimplemented mtvc (rt=%s, imm7=%d, value=0x%X)", Common.gprNames[rt], imm7, value));
                 break;
         }
     }
@@ -1860,7 +1868,19 @@ public class VfpuState extends FpuState {
     public void doVSIN(int vsize, int vd, int vs) {
         loadVs(vsize, vs);
         for (int i = 0; i < vsize; ++i) {
-            v3[i] = (float) Math.sin(PI_2 * v1[i]);
+        	float angle = v1[i];
+        	// Reducing the angle to [0..4[
+        	angle -= ((float) Math.floor(angle * 0.25f)) * 4f;
+        	// Handling of specific values first to avoid precision loss in float value
+        	if (angle == 0f || angle == 2f) {
+        		v3[i] = 0f;
+        	} else if (angle == 1f) {
+        		v3[i] = 1f;
+        	} else if (angle == 3f) {
+        		v3[i] = -1f;
+        	} else {
+        		v3[i] = (float) Math.sin(PI_2 * angle);
+        	}
         }
         saveVd(vsize, vd, v3);
     }
@@ -1868,12 +1888,18 @@ public class VfpuState extends FpuState {
     public void doVCOS(int vsize, int vd, int vs) {
         loadVs(vsize, vs);
         for (int i = 0; i < vsize; ++i) {
-        	float value = v1[i];
+        	float angle = v1[i];
+        	// Reducing the angle to [0..4[
+        	angle -= ((float) Math.floor(angle * 0.25f)) * 4f;
         	// Handling of specific values first to avoid precision loss in float value
-        	if (value == 1f || value == -1f) {
+        	if (angle == 1f || angle == 3f) {
         		v3[i] = 0f;
+        	} else if (angle == 0f) {
+        		v3[i] = 1f;
+        	} else if (angle == 2f) {
+        		v3[i] = -1f;
         	} else {
-        		v3[i] = (float) Math.cos(PI_2 * v1[i]);
+        		v3[i] = (float) Math.cos(PI_2 * angle);
         	}
         }
         saveVd(vsize, vd, v3);
@@ -3001,20 +3027,28 @@ public class VfpuState extends FpuState {
     // VFPU6:VROT
     public void doVROT(int vsize, int vd, int vs, int imm5) {
         loadVs(1, vs);
-
-        float value = v1[0];
         float ca, sa;
 
+        float angle = v1[0];
+    	// Reducing the angle to [0..4[
+    	angle -= ((float) Math.floor(angle * 0.25f)) * 4f;
+
         // Handling of specific values first to avoid precision loss in float value
-        if (value == 1f) {
+    	if (angle == 0f) {
+    		ca = 1f;
+    		sa = 0f;
+    	} else if (angle == 1f) {
         	ca = 0f;
         	sa = 1f;
-        } else if (value == -1f) {
+        } else if (angle == 2f) {
+        	ca = -1f;
+        	sa = 0f;
+        } else if (angle == 3f) {
         	ca = 0f;
         	sa = -1f;
         } else {
         	// General case
-            float a = PI_2 * value;
+        	double a = PI_2 * angle;
         	ca = (float) Math.cos(a);
         	sa = (float) Math.sin(a);
         }

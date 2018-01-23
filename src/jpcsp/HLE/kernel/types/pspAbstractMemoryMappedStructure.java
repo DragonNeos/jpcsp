@@ -20,6 +20,7 @@ import java.nio.charset.Charset;
 
 import jpcsp.Memory;
 import jpcsp.HLE.ITPointerBase;
+import jpcsp.HLE.TPointer;
 import jpcsp.memory.IMemoryReader;
 import jpcsp.memory.IMemoryWriter;
 import jpcsp.memory.MemoryReader;
@@ -28,7 +29,7 @@ import jpcsp.util.Utilities;
 
 public abstract class pspAbstractMemoryMappedStructure {
     private final static int unknown = 0x11111111;
-	private final static Charset charset16 = Charset.forName("UTF-16LE");
+	public final static Charset charset16 = Charset.forName("UTF-16LE");
 
     private int baseAddress;
     private int maxSize = Integer.MAX_VALUE;
@@ -64,7 +65,9 @@ public abstract class pspAbstractMemoryMappedStructure {
 
     public void read(Memory mem, int address) {
         start(mem, address);
-        read();
+        if (address != 0) {
+        	read();
+        }
     }
 
     public void read(ITPointerBase pointer) {
@@ -72,7 +75,10 @@ public abstract class pspAbstractMemoryMappedStructure {
     }
 
     public void read(ITPointerBase pointer, int offset) {
-    	read(Memory.getInstance(), pointer.getAddress() + offset);
+    	start(pointer.getMemory(), pointer.getAddress() + offset);
+    	if (pointer.isNotNull()) {
+    		read();
+    	}
     }
 
     public void write(Memory mem, int address) {
@@ -85,7 +91,7 @@ public abstract class pspAbstractMemoryMappedStructure {
     }
 
     public void write(ITPointerBase pointer, int offset) {
-    	write(Memory.getInstance(), pointer.getAddress() + offset);
+    	write(pointer.getMemory(), pointer.getAddress() + offset);
     }
 
     public void write(Memory mem) {
@@ -130,6 +136,10 @@ public abstract class pspAbstractMemoryMappedStructure {
         }
         offset += 2;
 
+        if (isBigEndian()) {
+        	value = endianSwap16((short) value);
+        }
+
         return value;
     }
 
@@ -137,6 +147,9 @@ public abstract class pspAbstractMemoryMappedStructure {
     	int n0 = read8();
     	int n1 = read8();
 
+    	if (isBigEndian()) {
+    		return (n0 << 8) | n1;
+    	}
     	return (n1 << 8) | n0;
     }
 
@@ -151,6 +164,10 @@ public abstract class pspAbstractMemoryMappedStructure {
         }
         offset += 4;
 
+        if (isBigEndian()) {
+        	value = endianSwap32(value);
+        }
+
         return value;
     }
 
@@ -158,6 +175,9 @@ public abstract class pspAbstractMemoryMappedStructure {
     	int n01 = readUnaligned16();
     	int n23 = readUnaligned16();
 
+    	if (isBigEndian()) {
+    		return (n01 << 16) | n23;
+    	}
     	return (n23 << 16) | n01;
     }
 
@@ -171,6 +191,10 @@ public abstract class pspAbstractMemoryMappedStructure {
             value = mem.read64(baseAddress + offset);
         }
         offset += 8;
+
+        if (isBigEndian()) {
+        	value = endianSwap64(value);
+        }
 
         return value;
     }
@@ -308,6 +332,21 @@ public abstract class pspAbstractMemoryMappedStructure {
     	return s.toString();
     }
 
+    protected TPointer readPointer() {
+    	int value = read32();
+    	if (value == 0) {
+    		return TPointer.NULL;
+    	}
+
+    	return new TPointer(mem, value);
+    }
+
+    protected void readPointerArray(TPointer[] array) {
+    	for (int i = 0; array != null && i < array.length; i++) {
+    		array[i] = readPointer();
+    	}
+    }
+
     /**
      * Write a string in UTF16, including a trailing '\0\0'
      * @param addr address where to write the string
@@ -365,32 +404,54 @@ public abstract class pspAbstractMemoryMappedStructure {
     protected void write16(short data) {
     	align16();
         if (offset < maxSize) {
-            mem.write16(baseAddress + offset, data);
+        	if (isBigEndian()) {
+        		data = (short) endianSwap16(data);
+        	}
+
+        	mem.write16(baseAddress + offset, data);
         }
         offset += 2;
     }
 
     protected void writeUnaligned16(short data) {
-    	write8((byte) data);
-    	write8((byte) (data >>> 8));
+    	if (isBigEndian()) {
+    		write8((byte) (data >>> 8));
+    		write8((byte) data);
+    	} else {
+    		write8((byte) data);
+    		write8((byte) (data >>> 8));
+    	}
     }
 
     protected void write32(int data) {
     	align32();
         if (offset < maxSize) {
+        	if (isBigEndian()) {
+        		data = endianSwap32(data);
+        	}
+
             mem.write32(baseAddress + offset, data);
         }
         offset += 4;
     }
 
     protected void writeUnaligned32(int data) {
-    	writeUnaligned16((short) data);
-    	writeUnaligned16((short) (data >>> 16));
+    	if (isBigEndian()) {
+    		writeUnaligned16((short) (data >>> 16));
+    		writeUnaligned16((short) data);
+    	} else {
+    		writeUnaligned16((short) data);
+    		writeUnaligned16((short) (data >>> 16));
+    	}
     }
 
     protected void write64(long data) {
     	align32();
         if (offset < maxSize) {
+        	if (isBigEndian()) {
+        		data = endianSwap64(data);
+        	}
+
             mem.write64(baseAddress + offset, data);
         }
         offset += 8;
@@ -439,6 +500,15 @@ public abstract class pspAbstractMemoryMappedStructure {
         offset += length;
     }
 
+    protected void writeStringN(int n, String s) {
+        if (offset < maxSize) {
+            Utilities.writeStringNZ(mem, baseAddress + offset, n, s);
+            // A NULL-byte has only been written at the end of the string
+            // when enough space was available.
+        }
+        offset += n;
+    }
+
     protected void writeStringNZ(int n, String s) {
         if (offset < maxSize) {
             Utilities.writeStringNZ(mem, baseAddress + offset, n - 1, s);
@@ -466,6 +536,20 @@ public abstract class pspAbstractMemoryMappedStructure {
         offset += object.sizeof();
     }
 
+    protected void writePointer(TPointer pointer) {
+    	if (pointer == null) {
+    		write32(0);
+    	} else {
+    		write32(pointer.getAddress());
+    	}
+    }
+
+    protected void writePointerArray(TPointer[] array) {
+    	for (int i = 0; array != null && i < array.length; i++) {
+    		writePointer(array[i]);
+    	}
+    }
+
     protected int getOffset() {
     	return offset;
     }
@@ -474,12 +558,28 @@ public abstract class pspAbstractMemoryMappedStructure {
     	return baseAddress;
     }
 
+    public boolean isNull() {
+    	return baseAddress == 0;
+    }
+
+    public boolean isNotNull() {
+    	return baseAddress != 0;
+    }
+
     protected int endianSwap16(short data) {
     	return Short.reverseBytes(data) & 0xFFFF;
     }
 
     protected int endianSwap32(int data) {
     	return Integer.reverseBytes(data);
+    }
+
+    protected long endianSwap64(long data) {
+    	return Long.reverseBytes(data);
+    }
+
+    protected boolean isBigEndian() {
+    	return false;
     }
 
     @Override

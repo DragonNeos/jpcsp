@@ -19,7 +19,9 @@ package jpcsp.crypto;
 import java.nio.ByteBuffer;
 import jpcsp.Emulator;
 import jpcsp.State;
+import jpcsp.HLE.kernel.types.pspAbstractMemoryMappedStructure;
 import jpcsp.format.PSF;
+import jpcsp.util.Utilities;
 
 public class SAVEDATA {
 
@@ -37,23 +39,40 @@ public class SAVEDATA {
     }
 
     // CHNNLSV SD context structs.
-    private class SD_Ctx1 {
+    public static class SD_Ctx1 extends pspAbstractMemoryMappedStructure {
+        public int mode;
+        public byte[] pad = new byte[16];
+        public byte[] key = new byte[16];
+        public int padSize;
 
-        private int mode;
-        private byte[] key;
-        private byte[] pad;
-        private int padSize;
+    	@Override
+    	protected void read() {
+    		mode = read32();
+    		read8Array(pad);
+    		read8Array(key);
+    		padSize = read32();
+    	}
 
-        public SD_Ctx1() {
-            mode = 0;
-            padSize = 0;
-            key = new byte[16];
-            pad = new byte[16];
-        }
+    	@Override
+    	protected void write() {
+    		write32(mode);
+    		write8Array(pad);
+    		write8Array(key);
+    		write32(padSize);
+    	}
+
+    	@Override
+    	public int sizeof() {
+    		return 40;
+    	}
+
+		@Override
+		public String toString() {
+			return String.format("mode=0x%X, pad=%s, key=%s, padSize=0x%X", mode, Utilities.getMemoryDump(pad, 0, pad.length), Utilities.getMemoryDump(key, 0, key.length), padSize);
+		}
     }
 
-    private class SD_Ctx2 {
-
+    public static class SD_Ctx2 extends pspAbstractMemoryMappedStructure {
         private int mode;
         private int unk;
         private byte[] buf;
@@ -63,6 +82,30 @@ public class SAVEDATA {
             unk = 0;
             buf = new byte[16];
         }
+
+		@Override
+		protected void read() {
+			mode = read32();
+			unk = read32();
+			read8Array(buf);
+		}
+
+		@Override
+		protected void write() {
+			write32(mode);
+			write32(unk);
+			write8Array(buf);
+		}
+
+		@Override
+		public int sizeof() {
+			return 24;
+		}
+
+		@Override
+		public String toString() {
+			return String.format("mode=0x%X, unk=0x%X, buf=%s", mode, unk, Utilities.getMemoryDump(buf, 0, buf.length));
+		}
     }
 
     private static boolean isNullKey(byte[] key) {
@@ -240,7 +283,7 @@ public class SAVEDATA {
     /*
      * sceSd - chnnlsv.prx
      */
-    private int hleSdSetIndex(SD_Ctx1 ctx, int encMode) {
+    public int hleSdSetIndex(SD_Ctx1 ctx, int encMode) {
         // Set all parameters to 0 and assign the encMode.
         ctx.mode = encMode;
         ctx.padSize = 0;
@@ -253,7 +296,7 @@ public class SAVEDATA {
         return 0;
     }
 
-    private int hleSdRemoveValue(SD_Ctx1 ctx, byte[] data, int length) {
+    public int hleSdRemoveValue(SD_Ctx1 ctx, byte[] data, int length) {
         if (ctx.padSize > 0x10 || (length < 0)) {
             // Invalid key or length.
             return -1;
@@ -315,7 +358,7 @@ public class SAVEDATA {
         }
     }
 
-    private int hleSdGetLastIndex(SD_Ctx1 ctx, byte[] hash, byte[] key) {
+    public int hleSdGetLastIndex(SD_Ctx1 ctx, byte[] hash, byte[] key) {
         if (ctx.padSize > 0x10) {
             // Invalid key length.
             return -1;
@@ -437,7 +480,7 @@ public class SAVEDATA {
         return 0;
     }
 
-    private int hleChnnlsv_21BE78B4(SD_Ctx2 ctx) {
+    public int hleSdCleanList(SD_Ctx2 ctx) {
         ctx.mode = 0;
         ctx.unk = 0;
         for (int i = 0; i < 0x10; i++) {
@@ -446,9 +489,9 @@ public class SAVEDATA {
         return 0;
     }
 
-    private int hleSdCreateList(SD_Ctx2 ctx, int encMode, int genMode, byte[] data, byte[] key) {
+    public int hleSdCreateList(SD_Ctx2 ctx, int encMode, int genMode, byte[] data, byte[] key) {
         // If the key is not a 16-byte key, return an error.
-        if (key.length < 0x10) {
+        if (!isNullKey(key) && key.length < 0x10) {
             return -1;
         }
 
@@ -551,7 +594,7 @@ public class SAVEDATA {
         }
     }
 
-    private int hleSdSetMember(SD_Ctx2 ctx, byte[] data, int length) {
+    public int hleSdSetMember(SD_Ctx2 ctx, byte[] data, int length) {
         if (length == 0) {
             return 0;
         }
@@ -583,7 +626,7 @@ public class SAVEDATA {
         SD_Ctx2 ctx2 = new SD_Ctx2();
 
         // Setup the buffers.
-        int alignedSize = ((size + 0xF) >> 4) << 4;
+        int alignedSize = (((size + 0xF) >> 4) << 4) - 0x10;
         byte[] decbuf = new byte[size - 0x10];
         byte[] tmpbuf = new byte[alignedSize];
 
@@ -616,7 +659,7 @@ public class SAVEDATA {
         hleSdSetMember(ctx2, tmpbuf, alignedSize);
 
         // Clear context 2.
-        hleChnnlsv_21BE78B4(ctx2);
+        hleSdCleanList(ctx2);
 
         // Copy back the data.
         System.arraycopy(tmpbuf, 0, decbuf, 0, size - 0x10);
@@ -681,7 +724,7 @@ public class SAVEDATA {
         System.arraycopy(tmpbuf1, 0, buf, 0, buf.length);
 
         // Clear context 2.
-        hleChnnlsv_21BE78B4(ctx2);
+        hleSdCleanList(ctx2);
 
         // Generate a file hash for this data.
         hleSdGetLastIndex(ctx1, hash, key);

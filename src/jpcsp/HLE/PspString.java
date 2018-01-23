@@ -63,8 +63,24 @@ public class PspString {
 		return address == 0;
 	}
 
+	public boolean isNotNull() {
+		return address != 0;
+	}
+
 	@Override
 	public String toString() {
 		return String.format("0x%08X('%s')", getAddress(), getString());
+	}
+
+	public boolean equals(String s) {
+		if (s == null) {
+			return isNull();
+		}
+
+		if (isNull()) {
+			return false;
+		}
+
+		return s.equals(getString());
 	}
 }

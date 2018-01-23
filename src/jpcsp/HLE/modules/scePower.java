@@ -16,6 +16,8 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.HLE.modules;
 
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLELogging;
 import jpcsp.HLE.HLEModule;
@@ -23,6 +25,7 @@ import jpcsp.HLE.HLEUnimplemented;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.SceKernelThreadInfo;
 import jpcsp.HLE.Modules;
+import jpcsp.HLE.TPointer32;
 import jpcsp.hardware.Battery;
 import jpcsp.hardware.Model;
 
@@ -77,6 +80,8 @@ public class scePower extends HLEModule {
     // or lower than 1/4 of the PLL clock's frequency.
     protected int busClock = 111;
     protected static final int backlightMaximum = 4;
+    protected int tachyonVoltage1;
+    protected int tachyonVoltage2;
 
     @HLEUnimplemented
     @HLEFunction(nid = 0x2B51FE2F, version = 150)
@@ -519,30 +524,57 @@ public class scePower extends HLEModule {
 
     @HLEFunction(nid = 0x737486F2, version = 150)
     public int scePowerSetClockFrequency(int pllClock, int cpuClock, int busClock) {
-        this.pllClock = pllClock;
+        if (cpuClock == 0 || cpuClock > 333) {
+        	log.warn(String.format("scePowerSetClockFrequency invalid frequency pllClock %d cpuClock %d busClock %d",pllClock,cpuClock,busClock));
+        	return SceKernelErrors.ERROR_INVALID_VALUE;
+        }
+
+        log.info(String.format("scePowerSetClockFrequency pllClock %d cpuClock %d busClock %d",pllClock,cpuClock,busClock));
         this.cpuClock = cpuClock;
         this.busClock = busClock;
+        if (this.pllClock != pllClock) {
+        	this.pllClock = pllClock;
 
+        	Modules.ThreadManForUserModule.hleKernelDelayThread(150000, false);
+        }
         return 0;
     }
 
     @HLEFunction(nid = 0xEBD177D6, version = 150)
     public int scePower_EBD177D6(int pllClock, int cpuClock, int busClock) {
         // Identical to scePowerSetClockFrequency.
-        this.pllClock = pllClock;
+        if (cpuClock == 0 || cpuClock > 333) {
+        	log.warn(String.format("scePower_EBD177D6 invalid frequency pllClock %d cpuClock %d busClock %d",pllClock,cpuClock,busClock));
+        	return SceKernelErrors.ERROR_INVALID_VALUE;
+        }
+
+        log.info(String.format("scePower_EBD177D6 pllClock %d cpuClock %d busClock %d",pllClock,cpuClock,busClock));
         this.cpuClock = cpuClock;
         this.busClock = busClock;
+        if (this.pllClock != pllClock) {
+        	this.pllClock = pllClock;
 
+        	Modules.ThreadManForUserModule.hleKernelDelayThread(150000, false);
+        }
         return 0;
     }
 
     @HLEFunction(nid = 0x469989AD, version = 630)
     public int scePower_469989AD(int pllClock, int cpuClock, int busClock) {
         // Identical to scePowerSetClockFrequency.
-        this.pllClock = pllClock;
+        if (cpuClock == 0 || cpuClock > 333) {
+        	log.warn(String.format("scePower_469989AD invalid frequency pllClock %d cpuClock %d busClock %d",pllClock,cpuClock,busClock));
+        	return SceKernelErrors.ERROR_INVALID_VALUE;
+        }
+
+        log.info(String.format("scePower_469989AD pllClock %d cpuClock %d busClock %d",pllClock,cpuClock,busClock));
         this.cpuClock = cpuClock;
         this.busClock = busClock;
+        if (this.pllClock != pllClock) {
+        	this.pllClock = pllClock;
 
+        	Modules.ThreadManForUserModule.hleKernelDelayThread(150000, false);
+        }
         return 0;
     }
 
@@ -558,5 +590,67 @@ public class scePower extends HLEModule {
         }
 
         return result;
+    }
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xBA566CD0, version = 660)
+    public int scePowerSetWakeupCondition(int condition) {
+        return 0;
+    }
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x3234844A, version = 150)
+    public int scePower_driver_3234844A() {
+        return 0;
+    }
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x5F5006D2, version = 660)
+    public int scePower_driver_5F5006D2() {
+        return scePower_driver_3234844A();
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x315B8CB6, version = 150)
+    public int scePowerUnregisterCallback_660() {
+    	return 0;
+    }
+
+    @HLELogging(level="info")
+    @HLEFunction(nid = 0x766CD857, version = 150)
+    public int scePowerRegisterCallback_660(int slot, int uid) {
+    	return scePowerRegisterCallback(slot, uid);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x55D2D789, version = 150)
+    public int scePowerGetTachyonVoltage(@BufferInfo(usage=Usage.out) TPointer32 unknown1, @BufferInfo(usage=Usage.out) TPointer32 unknown2) {
+    	unknown1.setValue(tachyonVoltage1);
+    	unknown2.setValue(tachyonVoltage2);
+    	return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xBADA8332, version = 660)
+    public int scePowerGetTachyonVoltage_660(@BufferInfo(usage=Usage.out) TPointer32 unknown1, @BufferInfo(usage=Usage.out) TPointer32 unknown2) {
+    	return scePowerGetTachyonVoltage(unknown1, unknown2);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xDD27F119, version = 150)
+    public int scePowerSetTachyonVoltage(int unknown1, int unknown2) {
+    	if (unknown1 != -1) {
+    		tachyonVoltage1 = unknown1 & 0xFFFF;
+    	}
+    	if (unknown2 != -1) {
+    		tachyonVoltage2 = unknown2 & 0xFFFF;
+    	}
+    	return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x12F8302D, version = 660)
+    public int scePowerSetTachyonVoltage_660(int unknown1, int unknown2) {
+    	return scePowerSetTachyonVoltage(unknown1, unknown2);
     }
 }

@@ -22,6 +22,8 @@ import java.nio.IntBuffer;
 
 import jpcsp.Memory;
 import jpcsp.MemoryMap;
+import jpcsp.Allegrex.compiler.RuntimeContext;
+import jpcsp.HLE.TPointer;
 
 /**
  * @author gid15
@@ -44,8 +46,8 @@ public class MemoryWriter {
 		return length;
 	}
 
-	private static IMemoryWriter getFastMemoryWriter(FastMemory mem, int address, int step) {
-		int[] memoryInt = mem.getAll();
+	private static IMemoryWriter getFastMemoryWriter(int address, int step) {
+		int[] memoryInt = RuntimeContext.getMemoryInt();
 
 		switch (step) {
 		case 1: return new MemoryWriterIntArray8(memoryInt, address);
@@ -71,14 +73,12 @@ public class MemoryWriter {
 	 * @return        the MemoryWriter
 	 */
 	public static IMemoryWriter getMemoryWriter(int address, int length, int step) {
-		Memory mem = Memory.getInstance();
-
 		address &= Memory.addressMask;
-		if (mem instanceof FastMemory) {
-			return getFastMemoryWriter((FastMemory) mem, address, step);
+		if (RuntimeContext.hasMemoryInt()) {
+			return getFastMemoryWriter(address, step);
 		}
 
-		if (!(mem instanceof DebuggerMemory)) {
+		if (!DebuggerMemory.isInstalled()) {
 			Buffer buffer = Memory.getInstance().getBuffer(address, length);
 
 			if (buffer instanceof IntBuffer) {
@@ -115,13 +115,48 @@ public class MemoryWriter {
 	 * @return        the MemoryWriter
 	 */
 	public static IMemoryWriter getMemoryWriter(int address, int step) {
-		Memory mem = Memory.getInstance();
-
 		address &= Memory.addressMask;
-		if (mem instanceof FastMemory) {
-			return getFastMemoryWriter((FastMemory) mem, address, step);
+		if (RuntimeContext.hasMemoryInt()) {
+			return getFastMemoryWriter(address, step);
 		}
 		return getMemoryWriter(address, getMaxLength(address), step);
+	}
+
+	/**
+	 * Creates a MemoryWriter to write values from memory.
+	 *
+	 * @param mem     the memory to be used.
+	 * @param address the address where to start writing.
+	 *                When step == 2, the address has to be 16-bit aligned ((address & 1) == 0).
+	 *                When step == 4, the address has to be 32-bit aligned ((address & 3) == 0).
+	 * @param step    when step == 1, write 8-bit values
+	 *                when step == 2, write 16-bit values
+	 *                when step == 4, write 32-bit values
+	 *                other value for step are not allowed.
+	 * @return        the MemoryWriter
+	 */
+	public static IMemoryWriter getMemoryWriter(Memory mem, int address, int length, int step) {
+		// Use the optimized version if we are just using the standard memory
+		if (mem == RuntimeContext.memory) {
+			return getMemoryWriter(address, length, step);
+		}
+
+		// Default (generic) MemoryWriter
+		return new MemoryWriterGeneric(mem, address, length, step);
+	}
+
+	/**
+	 * Creates a MemoryWriter to write values from memory.
+	 *
+	 * @param address the address where to start writing.
+	 * @param step    when step == 1, write 8-bit values
+	 *                when step == 2, write 16-bit values
+	 *                when step == 4, write 32-bit values
+	 *                other value for step are not allowed.
+	 * @return        the MemoryWriter
+	 */
+	public static IMemoryWriter getMemoryWriter(TPointer address, int length, int step) {
+		return getMemoryWriter(address.getMemory(), address.getAddress(), length, step);
 	}
 
 	private static class MemoryWriterGeneric implements IMemoryWriter {
@@ -129,6 +164,13 @@ public class MemoryWriter {
 		private int address;
 		private int length;
 		private int step;
+
+		public MemoryWriterGeneric(Memory mem, int address, int length, int step) {
+			this.mem = mem;
+			this.address = address;
+			this.length = length;
+			this.step = step;
+		}
 
 		public MemoryWriterGeneric(int address, int length, int step) {
 			this.address = address;

@@ -19,7 +19,7 @@ package jpcsp.hardware;
 import jpcsp.util.Utilities;
 
 public class MemoryStick {
-    // States for mscmhc0 (used in callbacks).
+	// States for mscmhc0 (used in callbacks).
     public final static int PSP_MEMORYSTICK_STATE_DRIVER_READY     = 1;
     public final static int PSP_MEMORYSTICK_STATE_DRIVER_BUSY      = 2;
     public final static int PSP_MEMORYSTICK_STATE_DEVICE_INSERTED  = 4;
@@ -32,9 +32,17 @@ public class MemoryStick {
     private static int msState = PSP_MEMORYSTICK_STATE_DRIVER_READY;
     private static int fatMsState = PSP_FAT_MEMORYSTICK_STATE_ASSIGNED;
 
-    // available size on memory stick, in bytes.
+    // Memory Stick power
+    private static boolean msPower = true;
+
+    // Total size of the memory stick, in bytes
+//    private static long totalSize = 64L * 1024 * 1024; // 64MB
+    private static long totalSize = 16L * 1024 * 1024 * 1024; // 16GB
+    // Free size on memory stick, in bytes
     private static long freeSize = 1L * 1024 * 1024 * 1024;	// 1GB
-    private static int sectorSize = 32 * 1024; // 32KB
+    private final static int sectorSize = 32 * 1024; // 32KB
+
+    private static boolean locked = false;
 
 	public static int getStateMs() {
 		return msState;
@@ -64,10 +72,6 @@ public class MemoryStick {
 		return Utilities.getSizeKb(getFreeSize());
 	}
 
-	public static void setFreeSize(long freeSize) {
-		MemoryStick.freeSize = freeSize;
-	}
-
 	public static int getSectorSize() {
 		return sectorSize;
 	}
@@ -90,5 +94,32 @@ public class MemoryStick {
 		}
 		sizeKb /= 1024;
 		return String.format("%d GB", sizeKb);
+	}
+
+	public static boolean isLocked() {
+		return locked;
+	}
+
+	public static void setLocked(boolean locked) {
+		MemoryStick.locked = locked;
+	}
+
+	public static boolean hasMsPower() {
+		return msPower;
+	}
+
+	public static void setMsPower(boolean msPower) {
+		MemoryStick.msPower = msPower;
+	}
+
+	public static long getTotalSize() {
+		return totalSize;
+	}
+
+	public static void setTotalSize(long totalSize) {
+		MemoryStick.totalSize = totalSize;
+		if (freeSize > totalSize) {
+			freeSize = totalSize;
+		}
 	}
 }

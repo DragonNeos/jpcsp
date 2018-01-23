@@ -928,8 +928,8 @@ public class BaseRenderingEngineProxy implements IRenderingEngine {
 	}
 
 	@Override
-	public boolean canNativeClut(int textureAddress, boolean textureSwizzle) {
-		return proxy.canNativeClut(textureAddress, textureSwizzle);
+	public boolean canNativeClut(int textureAddress, int pixelFormat, boolean textureSwizzle) {
+		return proxy.canNativeClut(textureAddress, pixelFormat, textureSwizzle);
 	}
 
 	@Override
@@ -1020,5 +1020,15 @@ public class BaseRenderingEngineProxy implements IRenderingEngine {
 	@Override
 	public void drawElementsBurstMode(int primitive, int count, int indexType, long indicesOffset) {
 		proxy.drawElementsBurstMode(primitive, count, indexType, indicesOffset);
+	}
+
+	@Override
+	public void textureBarrier() {
+		proxy.textureBarrier();
+	}
+
+	@Override
+	public boolean isTextureBarrierAvailable() {
+		return proxy.isTextureBarrierAvailable();
 	}
 }

@@ -16,14 +16,17 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.filesystems.umdiso;
 
+import jpcsp.util.FileUtil;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
-
-import org.bolet.jgz.Inflater;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 
 public class CSOFileSectorDevice extends AbstractFileSectorDevice {
 	protected int offsetShift;
@@ -37,17 +40,15 @@ public class CSOFileSectorDevice extends AbstractFileSectorDevice {
 
         /*
 	        u32 'CISO'
-	        u32 0?
-	        u32 image size in bytes (why? it could have been sectors and make things simpler!)
+	        u64 image size in bytes (first u32 is highest 32-bit, second u32 is lowest 32-bit)
 	        u32 sector size? (00000800 = 2048 = sector size)
 	        u32 ? (1)
 	        u32[] sector offsets (as many as image size / sector size, I guess)
          */
-
-		int lengthInBytes = byteBuffer.getInt(8);
+		long lengthInBytes = (((long) byteBuffer.getInt(4)) << 32) | (byteBuffer.getInt(8) & 0xFFFFFFFFL);
 		int sectorSize = byteBuffer.getInt(16);
 		offsetShift = byteBuffer.get(21) & 0xFF;
-		numSectors = lengthInBytes / sectorSize;
+		numSectors = getNumSectors(lengthInBytes, sectorSize);
 		sectorOffsets = new long[numSectors + 1];
 
 		byte[] offsetData = new byte[(numSectors + 1) * 4];
@@ -59,7 +60,7 @@ public class CSOFileSectorDevice extends AbstractFileSectorDevice {
 			sectorOffsets[i] = offsetBuffer.getInt(i * 4) & 0xFFFFFFFFL;
 			if (i > 0) {
 				if ((sectorOffsets[i] & sectorOffsetMask) < (sectorOffsets[i - 1] & sectorOffsetMask)) {
-                    throw new IOException(String.format("Invalid offset [%d]: 0x%08X < 0x%08X", i, sectorOffsets[i], sectorOffsets[i - 1]));
+					log.error(String.format("Corrupted CISO - Invalid offset [%d]: 0x%08X < 0x%08X", i, sectorOffsets[i], sectorOffsets[i - 1]));
 				}
 			}
 		}
@@ -92,10 +93,10 @@ public class CSOFileSectorDevice extends AbstractFileSectorDevice {
 		        fileAccess.read(compressedData);
 
 		        try {
-		            Inflater inf = new Inflater();
-		            ByteArrayInputStream b = new ByteArrayInputStream(compressedData);
-		            inf.reset(b);
-		            inf.readAll(buffer, offset, sectorLength);
+		            Inflater inf = new Inflater(true);
+					try (InputStream s = new InflaterInputStream(new ByteArrayInputStream(compressedData), inf)) {
+						FileUtil.readAll(s, buffer, offset, sectorLength);
+					}
 		        } catch (IOException e) {
 		            throw new IOException(String.format("Exception while uncompressing sector %d", sectorNumber));
 		        }

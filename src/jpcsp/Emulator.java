@@ -21,10 +21,10 @@ import static jpcsp.HLE.modules.SysMemUserForUser.USER_PARTITION_ID;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
-import jpcsp.Allegrex.CpuState;
 import jpcsp.Allegrex.compiler.Compiler;
 import jpcsp.Allegrex.compiler.Profiler;
 import jpcsp.Allegrex.compiler.RuntimeContext;
+import jpcsp.Allegrex.compiler.RuntimeContextLLE;
 import jpcsp.Debugger.InstructionCounter;
 import jpcsp.Debugger.StepLogger;
 import jpcsp.GUI.IMainGUI;
@@ -34,6 +34,8 @@ import jpcsp.HLE.Modules;
 import jpcsp.HLE.kernel.Managers;
 import jpcsp.HLE.kernel.managers.SceUidManager;
 import jpcsp.HLE.kernel.types.SceModule;
+import jpcsp.HLE.modules.SysMemUserForUser;
+import jpcsp.HLE.modules.SysMemUserForUser.SysMemInfo;
 import jpcsp.graphics.GEProfiler;
 import jpcsp.graphics.VertexCache;
 import jpcsp.graphics.VideoEngine;
@@ -43,7 +45,6 @@ import jpcsp.graphics.RE.software.BaseRenderer;
 import jpcsp.graphics.RE.software.RendererExecutor;
 import jpcsp.graphics.textures.TextureCache;
 import jpcsp.hardware.Battery;
-import jpcsp.hardware.Interrupts;
 import jpcsp.hardware.Wlan;
 import jpcsp.memory.MemorySections;
 import jpcsp.network.proonline.ProOnlineNetworkAdapter;
@@ -153,11 +154,25 @@ public class Emulator implements Runnable {
         return load(pspfilename, f, false);
     }
 
-    public SceModule load(String pspfilename, ByteBuffer f, boolean fromSyscall) throws IOException, GeneralJpcspException {
+    private int getLoadAddress() {
+        SysMemInfo testInfo = Modules.SysMemUserForUserModule.malloc(USER_PARTITION_ID, "test-LoadAddress", SysMemUserForUser.PSP_SMEM_Low, 0x100, 0);
+        if (testInfo == null) {
+        	return MemoryMap.START_USERSPACE + 0x4000;
+        }
 
+        int lowestAddress = testInfo.addr;
+        Modules.SysMemUserForUserModule.free(testInfo);
+
+        return lowestAddress;
+    }
+
+    public SceModule load(String pspfilename, ByteBuffer f, boolean fromSyscall) throws IOException, GeneralJpcspException {
         initNewPsp(fromSyscall);
 
-        module = Loader.getInstance().LoadModule(pspfilename, f, MemoryMap.START_USERSPACE + 0x4000, USER_PARTITION_ID, USER_PARTITION_ID, false);
+        HLEModuleManager.getInstance().loadAvailableFlash0Modules(fromSyscall);
+
+        int loadAddress = getLoadAddress();
+    	module = Loader.getInstance().LoadModule(pspfilename, f, loadAddress, USER_PARTITION_ID, USER_PARTITION_ID, false, true, fromSyscall);
 
         if ((module.fileFormat & Loader.FORMAT_ELF) != Loader.FORMAT_ELF) {
             throw new GeneralJpcspException("File format not supported!");
@@ -185,8 +200,6 @@ public class Emulator implements Runnable {
     private void initCpu(boolean fromSyscall) {
         RuntimeContext.update();
 
-        CpuState cpu = processor.cpu;
-
         int entryAddr = module.entry_addr;
         if (Memory.isAddressGood(module.module_start_func)) {
             if (module.module_start_func != entryAddr) {
@@ -195,11 +208,8 @@ public class Emulator implements Runnable {
             }
         }
 
-        cpu.pc = entryAddr; //PC.
-        cpu.npc = cpu.pc + 4;
-
         HLEModuleManager.getInstance().startModules(fromSyscall);
-        Modules.ThreadManForUserModule.Initialise(module, cpu.pc, module.attribute, module.pspfilename, module.modid, module.gp_value, fromSyscall);
+        Modules.ThreadManForUserModule.Initialise(module, entryAddr, module.attribute, module.pspfilename, module.modid, module.gp_value, fromSyscall);
 
         if (State.memoryViewer != null) {
             State.memoryViewer.RefreshMemory();
@@ -210,6 +220,7 @@ public class Emulator implements Runnable {
         moduleLoaded = false;
 
         HLEModuleManager.getInstance().stopModules();
+        NIDMapper.getInstance().unloadAll();
         RuntimeContext.reset();
 
         if (!fromSyscall) {
@@ -235,29 +246,28 @@ public class Emulator implements Runnable {
         }
 
         Battery.initialize();
-        Interrupts.initialize();
         Wlan.initialize();
         jpcsp.HLE.kernel.types.SceModule.ResetAllocator();
         SceUidManager.reset();
         HLEUidObjectMapping.reset();
         ProOnlineNetworkAdapter.init();
 
-        NIDMapper.getInstance().Initialise();
-        Loader.getInstance().reset();
         if (State.fileLogger != null) {
             State.fileLogger.resetLogging();
         }
         MemorySections.getInstance().reset();
 
-        HLEModuleManager.getInstance().Initialise(firmwareVersion);
+        HLEModuleManager.getInstance().init();
         Managers.reset();
         Modules.SysMemUserForUserModule.start();
         Modules.SysMemUserForUserModule.setFirmwareVersion(firmwareVersion);
+    	Modules.ThreadManForUserModule.start();
     }
 
     @Override
     public void run() {
         RuntimeContext.start();
+        RuntimeContextLLE.start();
         GEProfiler.initialise();
 
         clock.resume();
@@ -414,9 +424,8 @@ public class Emulator implements Runnable {
     public void setFirmwareVersion(int firmwareVersion) {
         this.firmwareVersion = firmwareVersion;
 
-        NIDMapper.getInstance().Initialise();
-        HLEModuleManager.getInstance().Initialise(this.firmwareVersion);
         Modules.SysMemUserForUserModule.setFirmwareVersion(this.firmwareVersion);
+        RuntimeContext.setFirmwareVersion(firmwareVersion);
     }
 
     /**
@@ -436,5 +445,9 @@ public class Emulator implements Runnable {
             VariableSpeedClock variableSpeedClock = new VariableSpeedClock(clock, numerator, denominator);
             setClock(variableSpeedClock);
         }
+    }
+
+    public void setModuleLoaded(boolean moduleLoaded) {
+    	this.moduleLoaded = moduleLoaded;
     }
 }

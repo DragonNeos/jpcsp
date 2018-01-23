@@ -34,6 +34,8 @@ import static jpcsp.HLE.modules.SysMemUserForUser.PSP_SMEM_Low;
 import static jpcsp.HLE.modules.sceAudiocodec.PSP_CODEC_AT3;
 import static jpcsp.HLE.modules.sceAudiocodec.PSP_CODEC_AT3PLUS;
 import static jpcsp.util.Utilities.readUnaligned32;
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.CheckArgument;
 import jpcsp.HLE.HLEFunction;
@@ -50,7 +52,6 @@ import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.pspFileBuffer;
 import jpcsp.HLE.modules.SysMemUserForUser.SysMemInfo;
 import jpcsp.HLE.modules.sceAudiocodec.AudiocodecInfo;
-import jpcsp.media.codec.CodecFactory;
 import jpcsp.media.codec.ICodec;
 import jpcsp.media.codec.atrac3.Atrac3Decoder;
 import jpcsp.media.codec.atrac3plus.Atrac3plusDecoder;
@@ -87,7 +88,15 @@ public class sceAtrac3plus extends HLEModule {
 
 	@Override
 	public int getMemoryUsage() {
-		return 0x4000;
+		// No need to allocate additional memory when the module has been
+		// loaded using sceKernelLoadModuleToBlock()
+		// by the PSP "flash0:/kd/utility.prx".
+		// The memory has already been allocated in that case.
+		if (Modules.ModuleMgrForKernelModule.isMemoryAllocatedForModule("flash0:/kd/libatrac3plus.prx")) {
+			return 0;
+		}
+
+		return 0x8000;
 	}
 
 	public    static final int AT3_MAGIC      = 0x0270; // "AT3"
@@ -151,7 +160,6 @@ public class sceAtrac3plus extends HLEModule {
 
     public static class AtracID extends AudiocodecInfo {
         // Internal info.
-    	private final int id;
         protected int codecType;
         protected boolean inUse;
         protected int currentReadPosition;
@@ -163,15 +171,15 @@ public class sceAtrac3plus extends HLEModule {
         protected int atracCurrentSample;
         protected int maxSamples;
         protected int skippedSamples;
+        protected int skippedEndSamples;
         private   int startSkippedSamples;
         protected int lastDecodedSamples;
         protected int channels;
-    	protected int outputChannels = 2; // Always default with 2 output channels
         // First buffer.
         protected pspFileBuffer inputBuffer;
         protected boolean reloadingFromLoopStart;
         // Second buffer.
-        protected int secondBufferAddr;
+        protected int secondBufferAddr = -1;
         protected int secondBufferSize;
         // Input file.
         protected int secondInputFileSize;
@@ -182,14 +190,17 @@ public class sceAtrac3plus extends HLEModule {
         protected int currentLoopNum = -1;
         // LowLevel decoding
         protected int sourceBufferLength;
+        // AddStreamData
+        protected int getStreamDataInfoCurrentSample;
 
         public AtracID(int id) {
-        	this.id = id;
+        	super(id);
         	info = new AtracFileInfo();
         }
 
         @Override
 		public void release() {
+        	super.release();
         	setInUse(false);
         	releaseContext();
         	releaseInternalBuffer();
@@ -219,7 +230,9 @@ public class sceAtrac3plus extends HLEModule {
         }
 
         public int decodeData(int samplesAddr, TPointer32 outEndAddr) {
-        	if (currentReadPosition + info.atracBytesPerFrame > info.inputFileSize || getAtracCurrentSample() > info.atracEndSample) {
+        	skippedEndSamples = 0;
+
+        	if (currentReadPosition + info.atracBytesPerFrame > info.inputFileSize || getAtracCurrentSample() - info.atracSampleOffset > info.atracEndSample) {
         		if (log.isDebugEnabled()) {
         			log.debug(String.format("decodeData returning ERROR_ATRAC_ALL_DATA_DECODED"));
         		}
@@ -228,27 +241,14 @@ public class sceAtrac3plus extends HLEModule {
         	}
 
         	if (inputBuffer.getCurrentSize() < info.atracBytesPerFrame) {
-        		if (log.isDebugEnabled()) {
-        			log.debug(String.format("decodeData returning ERROR_ATRAC_BUFFER_IS_EMPTY"));
-        		}
-        		outEndAddr.setValue(false);
-        		return ERROR_ATRAC_BUFFER_IS_EMPTY;
-        	}
-
-        	int readAddr = inputBuffer.getReadAddr();
-        	if (inputBuffer.getReadSize() < info.atracBytesPerFrame) {
-        		if (temporaryDecodeArea == null || temporaryDecodeArea.allocatedSize < info.atracBytesPerFrame) {
-        			if (temporaryDecodeArea != null) {
-        				Modules.SysMemUserForUserModule.free(temporaryDecodeArea);
-        			}
-            		temporaryDecodeArea = Modules.SysMemUserForUserModule.malloc(KERNEL_PARTITION_ID, "Temporary-sceAtrac3plus-DecodeData", PSP_SMEM_Low, info.atracBytesPerFrame, 0);
-        		}
-        		if (temporaryDecodeArea != null) {
-        			Memory mem = Memory.getInstance();
-        			readAddr = temporaryDecodeArea.addr;
-        			int wrapLength = inputBuffer.getReadSize();
-        			mem.memcpy(readAddr, inputBuffer.getReadAddr(), wrapLength);
-        			mem.memcpy(readAddr + wrapLength, inputBuffer.getAddr(), info.atracBytesPerFrame - wrapLength);
+        		if (getSecondBufferAddr() > 0 && getSecondBufferSize() >= info.atracBytesPerFrame) {
+        			addSecondBufferStreamData();
+        		} else {
+	        		if (log.isDebugEnabled()) {
+	        			log.debug(String.format("decodeData returning ERROR_ATRAC_BUFFER_IS_EMPTY"));
+	        		}
+	        		outEndAddr.setValue(false);
+	        		return ERROR_ATRAC_BUFFER_IS_EMPTY;
         		}
         	}
 
@@ -270,6 +270,23 @@ public class sceAtrac3plus extends HLEModule {
         		nextCurrentSample += maxSamples;
         	}
 
+        	int readAddr = inputBuffer.getReadAddr();
+        	if (inputBuffer.getReadSize() < info.atracBytesPerFrame) {
+        		if (temporaryDecodeArea == null || temporaryDecodeArea.allocatedSize < info.atracBytesPerFrame) {
+        			if (temporaryDecodeArea != null) {
+        				Modules.SysMemUserForUserModule.free(temporaryDecodeArea);
+        			}
+            		temporaryDecodeArea = Modules.SysMemUserForUserModule.malloc(KERNEL_PARTITION_ID, "Temporary-sceAtrac3plus-DecodeData", PSP_SMEM_Low, info.atracBytesPerFrame, 0);
+        		}
+        		if (temporaryDecodeArea != null) {
+        			Memory mem = Memory.getInstance();
+        			readAddr = temporaryDecodeArea.addr;
+        			int wrapLength = inputBuffer.getReadSize();
+        			mem.memcpy(readAddr, inputBuffer.getReadAddr(), wrapLength);
+        			mem.memcpy(readAddr + wrapLength, inputBuffer.getAddr(), info.atracBytesPerFrame - wrapLength);
+        		}
+        	}
+
         	SysMemInfo tempBuffer = null;
         	int decodedSamplesAddr = samplesAddr;
     		int bytesPerSample = 2 * getOutputChannels();
@@ -285,7 +302,7 @@ public class sceAtrac3plus extends HLEModule {
         	}
 
         	if (log.isDebugEnabled()) {
-        		log.debug(String.format("decodeData from 0x%08X(0x%X) to 0x%08X(0x%X), skippedSamples=0x%X, outputChannels=%d", readAddr, info.atracBytesPerFrame, decodedSamplesAddr, maxSamples, skippedSamples, outputChannels));
+        		log.debug(String.format("decodeData from 0x%08X(0x%X) to 0x%08X(0x%X), skippedSamples=0x%X, currentSample=0x%X, outputChannels=%d", readAddr, info.atracBytesPerFrame, decodedSamplesAddr, maxSamples, skippedSamples, currentSample, outputChannels));
         	}
 
         	int result = codec.decode(readAddr, info.atracBytesPerFrame, decodedSamplesAddr);
@@ -305,8 +322,9 @@ public class sceAtrac3plus extends HLEModule {
 
         	nextCurrentSample += codec.getNumberOfSamples() - skippedSamples;
 
-        	if (nextCurrentSample > info.atracEndSample) {
+        	if (nextCurrentSample - info.atracSampleOffset > info.atracEndSample) {
             	outEndAddr.setValue(info.loopNum == 0);
+            	skippedEndSamples = nextCurrentSample - info.atracSampleOffset - info.atracEndSample - 1;
         	} else {
         		outEndAddr.setValue(false);
         	}
@@ -360,19 +378,44 @@ public class sceAtrac3plus extends HLEModule {
         		reloadingFromLoopStart = true;
         	}
 
+        	// Remember the CurrentSample at the time of the getStreamDataInfo
+        	getStreamDataInfoCurrentSample = getAtracCurrentSample();
+
         	writeAddr.setValue(inputBuffer.getWriteAddr());
         	writableBytesAddr.setValue(inputBuffer.getWriteSize());
         	readOffsetAddr.setValue(inputBuffer.getFilePosition());
         }
 
         protected void addStreamData(int length) {
-            addStreamData(inputBuffer.getWriteAddr(), length);
+        	if (length > 0) {
+        		if (getAtracCurrentSample() < getStreamDataInfoCurrentSample) {
+        			// The atrac has looped since sceAtracGetStreamDataInfo() has been called.
+        			// Ignore sceAtracAddStreamData as we now need atrac data from the loop start.
+        			if (log.isDebugEnabled()) {
+        				log.debug(String.format("addStreamData ignored as the atrac has looped inbetween: sample 0x%X -> 0x%X", getStreamDataInfoCurrentSample, getAtracCurrentSample()));
+        			}
+        		} else {
+        			inputBuffer.notifyWrite(length);
+        		}
+        	}
         }
 
-        public void addStreamData(int address, int length) {
-        	if (length > 0) {
-        		inputBuffer.notifyWrite(length);
+        private void addSecondBufferStreamData() {
+        	while (inputBuffer.getWriteSize() > 0 && secondBufferSize > 0) {
+        		int length = Math.min(inputBuffer.getWriteSize(), secondBufferSize);
+        		if (log.isDebugEnabled()) {
+        			log.debug(String.format("addSecondBufferStreamData from 0x%08X to 0x%08X, length=0x%X", secondBufferAddr, inputBuffer.getWriteAddr(), length));
+        		}
+        		Memory.getInstance().memcpy(inputBuffer.getWriteAddr(), secondBufferAddr, length);
+        		addStreamData(length);
+        		secondBufferAddr += length;
+        		secondBufferSize -= length;
         	}
+
+        	if (secondBufferSize <= 0) {
+    			secondBufferAddr = -1;
+    			secondBufferSize = 0;
+    		}
         }
 
         public void setSecondBuffer(int address, int size) {
@@ -401,9 +444,13 @@ public class sceAtrac3plus extends HLEModule {
 	        		int contextAddr = atracContext.addr;
 	            	mem.memset(contextAddr, (byte) 0, atracContext.size);
 
-	            	mem.write32(contextAddr + 140, 0); // Unknown
-	    	        mem.write8(contextAddr + 149, (byte) 2); // Unknown.
-	    	        mem.write8(contextAddr + 151, (byte) 1); // Unknown.
+	            	if (hasLoop()) {
+	            		mem.write32(contextAddr + 140, info.loops[0].endSample); // loop end
+	            	} else {
+	            		mem.write32(contextAddr + 140, 0); // no loop
+	            	}
+	    	        mem.write8(contextAddr + 149, (byte) 2); // state
+	    	        mem.write8(contextAddr + 151, (byte) getChannels()); // number of channels
 	    	        mem.write16(contextAddr + 154, (short) getCodecType());
 	    	        //mem.write32(contextAddr + 168, 0); // Voice associated to this Atrac context using __sceSasSetVoiceATRAC3?
 
@@ -543,6 +590,9 @@ public class sceAtrac3plus extends HLEModule {
         	if (inputBufferContainsAllData()) {
         		return PSP_ATRAC_ALLDATA_IS_ON_MEMORY;
         	}
+        	if ((!hasLoop() || info.loopNum == 0) && inputBuffer.getFileWriteSize() <= 0) {
+        		return PSP_ATRAC_NONLOOP_STREAM_DATA_IS_ON_MEMORY;
+        	}
         	int remainFrames = inputBuffer.getCurrentSize() / info.atracBytesPerFrame;
 
         	return remainFrames;
@@ -563,7 +613,11 @@ public class sceAtrac3plus extends HLEModule {
         	} else {
         		writableBytes = inputBuffer.getMaxSize();
         		minimumWriteBytes = info.atracBytesPerFrame * 2;
-        		readPosition = getFilePositionFromSample(sample);
+            	if (sample == 0) {
+            		readPosition = 0;
+            	} else {
+            		readPosition = getFilePositionFromSample(sample);
+            	}
         	}
         	// Holds buffer related parameters.
             // Main buffer.
@@ -589,10 +643,14 @@ public class sceAtrac3plus extends HLEModule {
         	}
 
         	if (sample != atracCurrentSample) {
-	        	currentReadPosition = getFilePositionFromSample(sample);
 	        	// Do not change the position of the inputBuffer when it contains all the Atrac data
 	        	if (!inputBufferContainsAllData()) {
+		        	currentReadPosition = getFilePositionFromSample(sample);
 	        		inputBuffer.reset(bytesWrittenFirstBuf, currentReadPosition);
+	        	} else {
+		        	currentReadPosition = getFilePositionFromSample(sample);
+		        	inputBuffer.reset(inputBuffer.getFilePosition(), 0);
+		        	inputBuffer.notifyRead(currentReadPosition);
 	        	}
 	        	setAtracCurrentSample(sample);
         	}
@@ -689,7 +747,7 @@ public class sceAtrac3plus extends HLEModule {
 		}
 
 		public int getNumberOfSamples() {
-			return codec.getNumberOfSamples() - skippedSamples;
+			return codec.getNumberOfSamples() - skippedSamples - skippedEndSamples;
 		}
 
 		public boolean isInUse() {
@@ -702,13 +760,13 @@ public class sceAtrac3plus extends HLEModule {
 			if (inUse) {
 				initCodec();
 			} else {
+				setCodecInitialized(false);
 				codec = null;
 			}
 		}
 
-		@Override
 		public void initCodec() {
-			codec = CodecFactory.getCodec(getCodecType());
+			initCodec(getCodecType());
 		}
 
         @Override
@@ -791,7 +849,7 @@ public class sceAtrac3plus extends HLEModule {
         int magic = readUnaligned32(mem, currentAddr);
         int WAVEMagic = readUnaligned32(mem, currentAddr + 8);
         if (magic != RIFF_MAGIC || WAVEMagic != WAVE_MAGIC) {
-        	log.error(String.format("Not a RIFF/WAVE format! %08X %08X", magic, WAVEMagic));
+        	log.error(String.format("Not a RIFF/WAVE format! %s", Utilities.getMemoryDump(currentAddr, 16)));
         	return ERROR_ATRAC_UNKNOWN_FORMAT;
         }
 
@@ -868,7 +926,7 @@ public class sceAtrac3plus extends HLEModule {
         					info.atracSampleOffset = readUnaligned32(mem, currentAddr + 4); // The loop samples are offset by this value
         				}
                         if (log.isDebugEnabled()) {
-                        	log.debug(String.format("FACT Chunk: endSample=%d, sampleOffset=%d, size=%d", info.atracEndSample, info.atracSampleOffset, chunkSize));
+                        	log.debug(String.format("FACT Chunk: chunkSize=%d, endSample=0x%X, sampleOffset=0x%X", chunkSize, info.atracEndSample, info.atracSampleOffset));
                         }
         			}
         			break;
@@ -928,6 +986,10 @@ public class sceAtrac3plus extends HLEModule {
         	return SceKernelErrors.ERROR_ATRAC_INCORRECT_READ_SIZE;
         }
 
+        if (log.isTraceEnabled()) {
+        	log.trace(String.format("hleSetHalfwayBuffer buffer: %s", Utilities.getMemoryDump(buffer.getAddress(), readSize)));
+        }
+
         AtracFileInfo info = new AtracFileInfo();
         int codecType = analyzeRiffFile(buffer.getMemory(), buffer.getAddress(), readSize, info);
         if (codecType < 0) {
@@ -952,6 +1014,9 @@ public class sceAtrac3plus extends HLEModule {
 
     protected int hleSetHalfwayBufferAndGetID(TPointer buffer, int readSize, int bufferSize, boolean isMonoOutput) {
         if (readSize > bufferSize) {
+        	if (log.isDebugEnabled()) {
+        		log.debug(String.format("hleSetHalfwayBufferAndGetID returning 0x%X", ERROR_ATRAC_INCORRECT_READ_SIZE));
+        	}
         	return ERROR_ATRAC_INCORRECT_READ_SIZE;
         }
 
@@ -962,11 +1027,17 @@ public class sceAtrac3plus extends HLEModule {
         AtracFileInfo info = new AtracFileInfo();
         int codecType = analyzeRiffFile(buffer.getMemory(), buffer.getAddress(), readSize, info);
         if (codecType < 0) {
+        	if (log.isDebugEnabled()) {
+        		log.debug(String.format("hleSetHalfwayBufferAndGetID returning 0x%X", codecType));
+        	}
         	return codecType;
         }
 
         int atID = hleGetAtracID(codecType);
         if (atID < 0) {
+        	if (log.isDebugEnabled()) {
+        		log.debug(String.format("hleSetHalfwayBufferAndGetID returning 0x%X", atID));
+        	}
         	return atID;
         }
 
@@ -974,6 +1045,9 @@ public class sceAtrac3plus extends HLEModule {
     	int result = id.setHalfwayBuffer(buffer.getAddress(), readSize, bufferSize, isMonoOutput, info);
     	if (result < 0) {
     		hleReleaseAtracID(atID);
+        	if (log.isDebugEnabled()) {
+        		log.debug(String.format("hleSetHalfwayBufferAndGetID returning 0x%X", result));
+        	}
     		return result;
     	}
 
@@ -1197,7 +1271,7 @@ public class sceAtrac3plus extends HLEModule {
     }
 
     @HLEFunction(nid = 0x6A8C3CD5, version = 150, checkInsideInterrupt = true)
-    public int sceAtracDecodeData(@CheckArgument("checkAtracID") int atID, @CanBeNull TPointer16 samplesAddr, @CanBeNull TPointer32 samplesNbrAddr, @CanBeNull TPointer32 outEndAddr, @CanBeNull TPointer32 remainFramesAddr) {
+    public int sceAtracDecodeData(@CheckArgument("checkAtracID") int atID, @CanBeNull TPointer16 samplesAddr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 samplesNbrAddr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 outEndAddr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 remainFramesAddr) {
         AtracID id = atracIDs[atID];
         if (id.isSecondBufferNeeded() && !id.isSecondBufferSet()) {
             log.warn(String.format("sceAtracDecodeData atracID=0x%X needs second buffer!", atID));
@@ -1227,7 +1301,7 @@ public class sceAtrac3plus extends HLEModule {
     }
 
     @HLEFunction(nid = 0x9AE849A7, version = 150, checkInsideInterrupt = true)
-    public int sceAtracGetRemainFrame(@CheckArgument("checkAtracID") int atID, TPointer32 remainFramesAddr) {
+    public int sceAtracGetRemainFrame(@CheckArgument("checkAtracID") int atID, @BufferInfo(usage=Usage.out) TPointer32 remainFramesAddr) {
         AtracID id = atracIDs[atID];
 		remainFramesAddr.setValue(id.getRemainFrames());
 
@@ -1239,7 +1313,7 @@ public class sceAtrac3plus extends HLEModule {
     }
 
     @HLEFunction(nid = 0x5D268707, version = 150, checkInsideInterrupt = true)
-    public int sceAtracGetStreamDataInfo(@CheckArgument("checkAtracID") int atID, @CanBeNull TPointer32 writeAddr, @CanBeNull TPointer32 writableBytesAddr, @CanBeNull TPointer32 readOffsetAddr) {
+    public int sceAtracGetStreamDataInfo(@CheckArgument("checkAtracID") int atID, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 writeAddr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 writableBytesAddr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 readOffsetAddr) {
         AtracID id = atracIDs[atID];
         id.getStreamDataInfo(writeAddr, writableBytesAddr, readOffsetAddr);
 
@@ -1303,7 +1377,7 @@ public class sceAtrac3plus extends HLEModule {
     }
 
     @HLEFunction(nid = 0xA2BBA8BE, version = 150, checkInsideInterrupt = true)
-    public int sceAtracGetSoundSample(@CheckArgument("checkAtracID") int atID, @CanBeNull TPointer32 endSampleAddr, @CanBeNull TPointer32 loopStartSampleAddr, @CanBeNull TPointer32 loopEndSampleAddr) {
+    public int sceAtracGetSoundSample(@CheckArgument("checkAtracID") int atID, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 endSampleAddr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 loopStartSampleAddr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 loopEndSampleAddr) {
     	AtracID id = atracIDs[atID];
     	int endSample = id.getAtracEndSample();
         int loopStartSample = id.getLoopStartSample();
@@ -1334,7 +1408,7 @@ public class sceAtrac3plus extends HLEModule {
     }
 
     @HLEFunction(nid = 0xD6A5F2F7, version = 150, checkInsideInterrupt = true)
-    public int sceAtracGetMaxSample(@CheckArgument("checkAtracID") int atID, TPointer32 maxSamplesAddr) {
+    public int sceAtracGetMaxSample(@CheckArgument("checkAtracID") int atID, @BufferInfo(usage=Usage.out) TPointer32 maxSamplesAddr) {
     	AtracID id = atracIDs[atID];
         maxSamplesAddr.setValue(id.getMaxSamples());
 
@@ -1382,7 +1456,7 @@ public class sceAtrac3plus extends HLEModule {
     }
 
     @HLEFunction(nid = 0xFAA4F89B, version = 150, checkInsideInterrupt = true)
-    public int sceAtracGetLoopStatus(@CheckArgument("checkAtracID") int atID, @CanBeNull TPointer32 loopNbr, @CanBeNull TPointer32 statusAddr) {
+    public int sceAtracGetLoopStatus(@CheckArgument("checkAtracID") int atID, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 loopNbr, @CanBeNull @BufferInfo(usage=Usage.out) TPointer32 statusAddr) {
     	AtracID id = atracIDs[atID];
         loopNbr.setValue(id.getLoopNum());
         statusAddr.setValue(id.getLoopStatus());
@@ -1442,10 +1516,14 @@ public class sceAtrac3plus extends HLEModule {
 
     @HLEFunction(nid = 0x132F1ECA, version = 250, checkInsideInterrupt = true)
     public int sceAtracReinit(int at3IDNum, int at3plusIDNum) {
-		int result = hleAtracReinit(at3IDNum, at3plusIDNum);
+    	int result = 0;
 
-    	if (result >= 0) {
-    		Modules.ThreadManForUserModule.hleYieldCurrentThread();
+    	if (at3IDNum != 0 || at3plusIDNum != 0) {
+    		result = hleAtracReinit(at3IDNum, at3plusIDNum);
+
+    		if (result >= 0) {
+        		Modules.ThreadManForUserModule.hleYieldCurrentThread();
+        	}
     	}
 
     	return result;

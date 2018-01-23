@@ -20,11 +20,13 @@ import org.apache.log4j.Logger;
 
 import jpcsp.Emulator;
 import jpcsp.Memory;
+import jpcsp.Processor;
 import jpcsp.Allegrex.CpuState;
 import jpcsp.Allegrex.Decoder;
 import jpcsp.Allegrex.Common.Instruction;
 import jpcsp.Allegrex.compiler.Compiler;
 import jpcsp.Allegrex.compiler.RuntimeContext;
+import jpcsp.Allegrex.compiler.RuntimeContextLLE;
 import jpcsp.memory.IMemoryReader;
 import jpcsp.memory.MemoryReader;
 
@@ -55,12 +57,31 @@ public abstract class AbstractNativeCodeSequence implements INativeCodeSequence 
 		return toLowerCase;
 	}
 
+	static protected Processor getProcessor() {
+		return RuntimeContext.processor;
+	}
+
 	static protected CpuState getCpu() {
 		return RuntimeContext.cpu;
 	}
 
+	static protected Memory getMemoryForLLE() {
+		Memory mem;
+		if (RuntimeContextLLE.isLLEActive()) {
+			mem = RuntimeContextLLE.getMMIO();
+		} else {
+			mem = getMemory();
+		}
+
+		return mem;
+	}
+
 	static protected Memory getMemory() {
 		return RuntimeContext.memory;
+	}
+
+	static protected int getPc() {
+		return getCpu().pc;
 	}
 
 	static protected int getRegisterValue(int register) {
@@ -155,6 +176,9 @@ public abstract class AbstractNativeCodeSequence implements INativeCodeSequence 
 
 	static public int strcmp(int src1Addr, int src2Addr) {
 		if (src1Addr == 0) {
+			if (src2Addr == 0) {
+				return 0;
+			}
 			return -1;
 		}
 
@@ -182,6 +206,10 @@ public abstract class AbstractNativeCodeSequence implements INativeCodeSequence 
 	}
 
 	static public int getStrlen(int srcAddr) {
+		if (srcAddr == 0) {
+			return 0;
+		}
+
 		int srcAddr3 = srcAddr & 3;
 		// Reading 32-bit values is much faster
 		IMemoryReader memoryReader = MemoryReader.getMemoryReader(srcAddr - srcAddr3, 4);
@@ -245,15 +273,15 @@ public abstract class AbstractNativeCodeSequence implements INativeCodeSequence 
 	}
 
 	static protected int getStrlen(int srcAddr, int maxLength) {
+		if (srcAddr == 0 || maxLength <= 0) {
+			return 0;
+		}
+
 		int srcAddr3 = srcAddr & 3;
 		// Reading 32-bit values is much faster
 		IMemoryReader memoryReader = MemoryReader.getMemoryReader(srcAddr - srcAddr3, 4);
 		if (memoryReader == null) {
 			Compiler.log.warn("getStrlen: null MemoryReader");
-			return 0;
-		}
-
-		if (maxLength <= 0) {
 			return 0;
 		}
 

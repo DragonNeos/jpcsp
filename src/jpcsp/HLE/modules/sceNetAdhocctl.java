@@ -16,6 +16,9 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.HLE.modules;
 
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
@@ -647,7 +650,7 @@ public class sceNetAdhocctl extends HLEModule {
      * @return 0 on success, < 0 on error.
      */
     @HLEFunction(nid = 0x5E7F79C9, version = 150, checkInsideInterrupt = true)
-    public int sceNetAdhocctlJoin(TPointer scanInfoAddr) {
+    public int sceNetAdhocctlJoin(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=28, usage=Usage.in) TPointer scanInfoAddr) {
     	checkInitialized();
 
         if (scanInfoAddr.isAddressGood()) {
@@ -712,7 +715,7 @@ public class sceNetAdhocctl extends HLEModule {
      * Register an adhoc event handler
      *
      * @param handler - The event handler.
-     * @param unknown - Pass NULL.
+     * @param unknown60 - Pass NULL.
      *
      * @return Handler id on success, < 0 on error.
      */
@@ -761,7 +764,7 @@ public class sceNetAdhocctl extends HLEModule {
      * @return 0 on success, < 0 on error
      */
     @HLEFunction(nid = 0x75ECD386, version = 150, checkInsideInterrupt = true)
-    public int sceNetAdhocctlGetState(TPointer32 stateAddr) {
+    public int sceNetAdhocctlGetState(@BufferInfo(usage=Usage.out) TPointer32 stateAddr) {
     	checkInitialized();
 
         stateAddr.setValue(adhocctlCurrentState);
@@ -798,7 +801,7 @@ public class sceNetAdhocctl extends HLEModule {
      * @return 0 on success, < 0 on error.
      */
     @HLEFunction(nid = 0xE162CB14, version = 150)
-    public int sceNetAdhocctlGetPeerList(TPointer32 sizeAddr, @CanBeNull TPointer buf) {
+    public int sceNetAdhocctlGetPeerList(@BufferInfo(usage=Usage.inout) TPointer32 sizeAddr, @CanBeNull @BufferInfo(lengthInfo=LengthInfo.fixedLength, length=152, usage=Usage.out) TPointer buf) {
     	checkInitialized();
 
         int size = sizeAddr.getValue();
@@ -845,7 +848,7 @@ public class sceNetAdhocctl extends HLEModule {
      * @return 0 on success, < 0 on error.
      */
     @HLEFunction(nid = 0x8DB83FDC, version = 150)
-    public int sceNetAdhocctlGetPeerInfo(pspNetMacAddress macAddress, int size, TPointer peerInfoAddr) {
+    public int sceNetAdhocctlGetPeerInfo(pspNetMacAddress macAddress, int size, @BufferInfo(lengthInfo=LengthInfo.previousParameter, usage=Usage.out) TPointer peerInfoAddr) {
     	checkInitialized();
 
     	int result = SceKernelErrors.ERROR_NET_ADHOC_NO_ENTRY;
@@ -994,7 +997,7 @@ public class sceNetAdhocctl extends HLEModule {
      * @return 0 on success, < 0 on error.
      */
     @HLEFunction(nid = 0x81AEE1BE, version = 150)
-    public int sceNetAdhocctlGetScanInfo(TPointer32 sizeAddr, @CanBeNull TPointer buf) {
+    public int sceNetAdhocctlGetScanInfo(@BufferInfo(usage=Usage.inout) TPointer32 sizeAddr, @CanBeNull @BufferInfo(lengthInfo=LengthInfo.fixedLength, length=112, usage=Usage.out) TPointer buf) {
     	checkInitialized();
 
     	final int scanInfoSize = 28;
@@ -1063,7 +1066,15 @@ public class sceNetAdhocctl extends HLEModule {
     public int sceNetAdhocctlCreateEnterGameMode(@CanBeNull @StringInfo(maxLength=GROUP_NAME_LENGTH) PspString groupName, int unknown, int num, TPointer macsAddr, int timeout, int unknown2) {
     	checkInitialized();
 
-        gameModeMacs.clear();
+    	if (unknown <= 0 || unknown > 3 || num < 2 || num > 16) {
+    		return SceKernelErrors.ERROR_NET_ADHOCCTL_INVALID_PARAMETER;
+    	}
+
+    	if (unknown == 1 && num > 4) {
+    		return SceKernelErrors.ERROR_NET_ADHOCCTL_INVALID_PARAMETER;
+    	}
+
+    	gameModeMacs.clear();
         requiredGameModeMacs.clear();
         for (int i = 0; i < num; i++) {
             pspNetMacAddress macAddress = new pspNetMacAddress();

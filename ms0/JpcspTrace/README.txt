@@ -46,6 +46,25 @@ The format of the file JpcspTrace.config is the following:
 - the file is processed line by line
 - leading spaces or tabs in a line are ignored
 - an empty line or a line starting with a "#" is a comment
+- the log buffer length can be set using a line starting with
+    LogBufferLength 0xNNNN
+- the log buffer is written to the log.txt file at each output line
+  unless the following line is present:
+    BufferLogWrites
+  In this case, the log buffer is written to the log.txt file only when
+  the buffer is full. This method has a better performance but some log data
+  could be lost in case JpcspTrace is crashing.
+- a memory range can be dumped to a file using the following command:
+    DumpMemory 0xNNNNNNNN 0xNNN ms0:/filename
+  where the first parameter is the address start, the second parameter
+  is the length in bytes to be dumped and the third parameter is
+  the file name where the memory will be dumped.
+- the file flash0:/kd/resource/meimg.img need to be decrypted on a real PSP
+  before it can be used in Jpcsp for the "--reboot" function.
+  The following command is decrypting this file:
+    DecryptMeimg flash0:/kd/resource/meimg.img ms0:/meimg.img
+  The result file ms0:/meimg.img need then to be copied to Jpcsp
+  flash0/kd/resource/meimg.img
 - one syscall to be traced is described in a single line:
 	<syscall-name> <nid> <number-of-parameters> <parameter-types>
 
@@ -79,12 +98,18 @@ The format of the file JpcspTrace.config is the following:
   - e: log the parameter value as a Mpeg EP structure (16 bytes long)
   - a: log the parameter value as a SceMpegAu structure (24 bytes long, see sceMpeg)
   - t: log the parameter value as a SceMp4TrackSampleBuf structure (240 bytes long, see sceMp4)
+  - I: log the parameter value as a pspNetSockAddrInternet structure (8 bytes long, see sceNetInet)
+  - B: log the parameter value as a pointer to a memory buffer having its length
+       stored into the next parameter value
+  - V: log the parameter value as a video codec structure as used in sceVideocodec
   - !: this flag is not a parameter type but indicates that the syscall parameters have
        to be logged before and after the syscall (i.e. twice). By default, the parameters
        are only logged after the syscall.
   - $: this flag is not a parameter type but indicates that the total free memory
        and maximum free memory have to be logged with the syscall. In combination with
        the '!' flag, the free memory before and after the syscall can be logged.
+  - >: this flag is not a parameter type but indicates that the stack usage
+       of the function has to logged.
   All the parameter types are concatenated into one string, starting with
   the type of the first parameter ($a0). Unspecified parameter types default to "x".
 

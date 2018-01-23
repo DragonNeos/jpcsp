@@ -17,9 +17,9 @@
 package jpcsp.Debugger;
 
 import java.awt.event.KeyEvent;
-import java.io.BufferedWriter;
+import java.io.BufferedOutputStream;
 import java.io.File;
-import java.io.FileWriter;
+import java.io.FileOutputStream;
 import java.io.IOException;
 
 import javax.swing.JOptionPane;
@@ -27,7 +27,12 @@ import javax.swing.SwingUtilities;
 
 import jpcsp.Emulator;
 import jpcsp.Memory;
+import jpcsp.MemoryMap;
 import jpcsp.WindowPropSaver;
+import jpcsp.Allegrex.compiler.RuntimeContextLLE;
+import jpcsp.memory.IMemoryReader;
+import jpcsp.memory.MemoryReader;
+import jpcsp.memory.mmio.MMIO;
 import jpcsp.util.Utilities;
 
 /**
@@ -58,23 +63,37 @@ public class MemoryViewer extends javax.swing.JFrame {
 
     private static byte safeRead8(Memory mem, int address) {
         byte value = 0;
-        if (Memory.isAddressGood(address)) {
+        if (isAddressGood(address)) {
             value = (byte) mem.read8(address);
         }
         return value;
     }
 
+    public static boolean isAddressGood(int address) {
+    	if (RuntimeContextLLE.isLLEActive()) {
+    		return MMIO.isAddressGood(address);
+    	}
+    	return Memory.isAddressGood(address);
+    }
+
+    public static Memory getMemory() {
+    	if (RuntimeContextLLE.isLLEActive()) {
+    		return RuntimeContextLLE.getMMIO();
+    	}
+    	return Memory.getInstance();
+    }
+
     public static String getMemoryView(int addr) {
         byte[] line = new byte[16];
-        Memory mem = Memory.getInstance();
+        Memory mem = getMemory();
 
         for (int i = 0; i < line.length; i++) {
             line[i] = safeRead8(mem, addr + i);
         }
 
-        return String.format("%08x : %02x %02x %02x %02x %02x %02x "
-                + "%02x %02x %02x %02x %02x %02x %02x %02x "
-                + "%02x %02x %c %c %c %c %c %c %c %c %c %c %c %c %c %c %c %c", addr,
+        return String.format("%08X : %02X %02X %02X %02X %02X %02X "
+                + "%02X %02X %02X %02X %02X %02X %02X %02X "
+                + "%02X %02X %c %c %c %c %c %c %c %c %c %c %c %c %c %c %c %c", addr,
                 line[0], line[1], line[2], line[3], line[4], line[5], line[6], line[7],
                 line[8], line[9], line[10], line[11], line[12], line[13], line[14], line[15],
                 converttochar(line[0]), converttochar(line[1]),
@@ -265,13 +284,13 @@ private void btnGoToAddressActionPerformed(java.awt.event.ActionEvent evt) {//GE
         String gettext = AddressField.getText();
         int value;
         try {
-            value = Integer.decode(gettext);
+            value = Utilities.parseAddressExpression(gettext);
         } catch (Exception e) {
             JOptionPane.showMessageDialog(this, java.util.ResourceBundle.getBundle("jpcsp/languages/jpcsp").getString("MemoryViewer.strInvalidAddress.text"));
             return;
         }
         startaddress = value;
-        AddressField.setText(String.format("0x%08x", value));
+        AddressField.setText(String.format("0x%08X", value));
         RefreshMemory();
     }
 
@@ -294,15 +313,15 @@ private void btnGoToSPActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIR
 
 private void btnDumpRawRamActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_btnDumpRawRamActionPerformed
         File f = new File("ramdump.bin");
-        BufferedWriter out = null;
+        BufferedOutputStream out = null;
         try {
-            out = new BufferedWriter(new FileWriter(f));
-            Memory mem = Memory.getInstance();
-            for (int i = 0x08000000; i <= 0x09ffffff; i++) {
-                out.write(safeRead8(mem, i));
+            out = new BufferedOutputStream(new FileOutputStream(f));
+            IMemoryReader memoryReader = MemoryReader.getMemoryReader(MemoryMap.START_RAM, MemoryMap.SIZE_RAM, 1);
+            for (int i = 0; i < MemoryMap.SIZE_RAM; i++) {
+                out.write(memoryReader.readNext());
             }
         } catch (IOException e) {
-            // do nothing
+            // Ignore exception
         } finally {
             Utilities.close(out);
         }

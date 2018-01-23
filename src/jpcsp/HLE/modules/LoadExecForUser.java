@@ -36,11 +36,14 @@ import jpcsp.Memory;
 import jpcsp.Processor;
 import jpcsp.Allegrex.compiler.RuntimeContext;
 import jpcsp.HLE.Modules;
+import jpcsp.HLE.VFS.IVirtualFile;
+import jpcsp.HLE.VFS.xmb.XmbIsoVirtualFile;
 import jpcsp.HLE.kernel.types.SceKernelCallbackInfo;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.SceKernelThreadInfo;
 import jpcsp.HLE.kernel.types.SceModule;
 import jpcsp.filesystems.SeekableDataInput;
+import jpcsp.filesystems.umdiso.UmdIsoReader;
 import jpcsp.memory.IMemoryReader;
 import jpcsp.memory.MemoryReader;
 import jpcsp.util.Utilities;
@@ -57,52 +60,24 @@ public class LoadExecForUser extends HLEModule {
         Modules.ThreadManForUserModule.hleKernelNotifyCallback(SceKernelThreadInfo.THREAD_CALLBACK_EXIT, 0);
     }
 
-    @HLELogging(level="info")
-    @HLEFunction(nid = 0xBD2F1094, version = 150, checkInsideInterrupt = true)
-    public int sceKernelLoadExec(PspString filename, @CanBeNull TPointer32 optionAddr) {
-        String name = filename.getString();
-
-        // The PSP is replacing a loadexec of disc0:/PSP_GAME/SYSDIR/BOOT.BIN with EBOOT.BIN
-        if (name.equals(unencryptedBootPath)) {
-    		log.info(String.format("sceKernelLoadExec '%s' replaced by '%s'", name, encryptedBootPath));
-    		name = encryptedBootPath;
+    public int hleKernelLoadExec(ByteBuffer moduleBuffer, int argSize, int argAddr, String moduleFileName, UmdIsoReader iso) {
+        byte[] arguments = null;
+        if (argSize > 0) {
+            // Save the memory content for the arguments because
+            // the memory would be overwritten by the loading of the new module.
+            arguments = new byte[argSize];
+            IMemoryReader memoryReader = MemoryReader.getMemoryReader(argAddr, argSize, 1);
+            for (int i = 0; i < argSize; i++) {
+            	arguments[i] = (byte) memoryReader.readNext();
+            }
         }
 
         // Flush system memory to mimic a real PSP reset.
         Modules.SysMemUserForUserModule.reset();
 
-        byte[] arguments = null;
-        int argSize = 0;
-        if (optionAddr.isNotNull()) {
-            int optSize = optionAddr.getValue(0);   // Size of the option struct.
-            if (optSize >= 16) {
-	            argSize = optionAddr.getValue(4);       // Size of memory required for arguments.
-	            int argAddr = optionAddr.getValue(8);   // Arguments (memory area of size argSize).
-	            int keyAddr = optionAddr.getValue(12);  // Pointer to an encryption key (may not be used).
-
-	            if (log.isDebugEnabled()) {
-	            	log.debug(String.format("sceKernelLoadExec params: optSize=%d, argSize=%d, argAddr=0x%08X, keyAddr=0x%08X: %s", optSize, argSize, argAddr, keyAddr, Utilities.getMemoryDump(argAddr, argSize)));
-	            }
-
-	            // Save the memory content for the arguments because
-	            // the memory would be overwritten by the loading of the new module.
-	            arguments = new byte[argSize];
-	            IMemoryReader memoryReader = MemoryReader.getMemoryReader(argAddr, argSize, 1);
-	            for (int i = 0; i < argSize; i++) {
-	            	arguments[i] = (byte) memoryReader.readNext();
-	            }
-            }
-        }
-
         try {
-            SeekableDataInput moduleInput = Modules.IoFileMgrForUserModule.getFile(name, IoFileMgrForUser.PSP_O_RDONLY);
-            if (moduleInput != null) {
-                byte[] moduleBytes = new byte[(int) moduleInput.length()];
-                moduleInput.readFully(moduleBytes);
-                moduleInput.close();
-                ByteBuffer moduleBuffer = ByteBuffer.wrap(moduleBytes);
-
-                SceModule module = Emulator.getInstance().load(name, moduleBuffer, true);
+            if (moduleBuffer != null) {
+                SceModule module = Emulator.getInstance().load(moduleFileName, moduleBuffer, true);
                 Emulator.getClock().resume();
 
                 // After a sceKernelLoadExec, host0: is relative to the directory where
@@ -114,9 +89,11 @@ public class LoadExecForUser extends HLEModule {
                 //    sceIoOpen("host0:B")
                 //  is actually referencing the file
                 //    disc0:/PSP_GAME/USRDIR/B
-                int pathIndex = name.lastIndexOf("/");
-                if (pathIndex >= 0) {
-                	Modules.IoFileMgrForUserModule.setHost0Path(name.substring(0, pathIndex + 1));
+                if (moduleFileName != null) {
+	                int pathIndex = moduleFileName.lastIndexOf("/");
+	                if (pathIndex >= 0) {
+	                	Modules.IoFileMgrForUserModule.setHost0Path(moduleFileName.substring(0, pathIndex + 1));
+	                }
                 }
 
                 if ((module.fileFormat & Loader.FORMAT_ELF) != Loader.FORMAT_ELF) {
@@ -126,18 +103,99 @@ public class LoadExecForUser extends HLEModule {
 
             	// Set the given arguments to the root thread.
             	// Do not pass the file name as first parameter (tested on PSP).
-            	SceKernelThreadInfo rootThread = Modules.ThreadManForUserModule.getCurrentThread();
+            	SceKernelThreadInfo rootThread = Modules.ThreadManForUserModule.getRootThread(module);
             	Modules.ThreadManForUserModule.hleKernelSetThreadArguments(rootThread, arguments, argSize);
+
+            	// The memory model (32MB / 64MB) could have been changed, update the RuntimeContext
+            	RuntimeContext.updateMemory();
+
+            	if (iso != null) {
+            		Modules.IoFileMgrForUserModule.setIsoReader(iso);
+            		Modules.sceUmdUserModule.setIsoReader(iso);
+            	}
             }
         } catch (GeneralJpcspException e) {
             log.error("General Error", e);
             Emulator.PauseEmu();
         } catch (IOException e) {
-            log.error(String.format("sceKernelLoadExec - Error while loading module '%s'", name), e);
+            log.error(String.format("sceKernelLoadExec - Error while loading module '%s'", moduleFileName), e);
             return ERROR_KERNEL_PROHIBIT_LOADEXEC_DEVICE;
         }
 
         return 0;
+    }
+
+    public int hleKernelLoadExec(PspString filename, int argSize, int argAddr) {
+        String name = filename.getString();
+
+        // The PSP is replacing a loadexec of disc0:/PSP_GAME/SYSDIR/BOOT.BIN with EBOOT.BIN
+        if (name.equals(unencryptedBootPath)) {
+    		log.info(String.format("sceKernelLoadExec '%s' replaced by '%s'", name, encryptedBootPath));
+    		name = encryptedBootPath;
+        }
+
+        ByteBuffer moduleBuffer = null;
+
+        IVirtualFile vFile = Modules.IoFileMgrForUserModule.getVirtualFile(name, IoFileMgrForUser.PSP_O_RDONLY, 0);
+        UmdIsoReader iso = null;
+    	if (vFile instanceof XmbIsoVirtualFile) {
+    		try {
+	    		IVirtualFile vFileLoadExec = ((XmbIsoVirtualFile) vFile).ioReadForLoadExec();
+	    		if (vFileLoadExec != null) {
+	    			iso = ((XmbIsoVirtualFile) vFile).getIsoReader();
+	
+	        		vFile.ioClose();
+	    			vFile = vFileLoadExec;
+	    		}
+    		} catch (IOException e) {
+    			log.debug("hleKernelLoadExec", e);
+    		}
+    	}
+
+    	if (vFile != null) {
+        	byte[] moduleBytes = Utilities.readCompleteFile(vFile);
+        	vFile.ioClose();
+        	if (moduleBytes != null) {
+        		moduleBuffer = ByteBuffer.wrap(moduleBytes);
+        	}
+        } else {
+	        SeekableDataInput moduleInput = Modules.IoFileMgrForUserModule.getFile(name, IoFileMgrForUser.PSP_O_RDONLY);
+	        if (moduleInput != null) {
+				try {
+					byte[] moduleBytes = new byte[(int) moduleInput.length()];
+		            moduleInput.readFully(moduleBytes);
+		            moduleInput.close();
+		            moduleBuffer = ByteBuffer.wrap(moduleBytes);
+				} catch (IOException e) {
+		            log.error(String.format("sceKernelLoadExec - Error while loading module '%s'", name), e);
+		            return ERROR_KERNEL_PROHIBIT_LOADEXEC_DEVICE;
+				}
+	        }
+        }
+
+    	return hleKernelLoadExec(moduleBuffer, argSize, argAddr, name, iso);
+    }
+
+    @HLELogging(level="info")
+    @HLEFunction(nid = 0xBD2F1094, version = 150, checkInsideInterrupt = true)
+    public int sceKernelLoadExec(PspString filename, @CanBeNull TPointer32 optionAddr) {
+        int argSize = 0;
+        int argAddr = 0;
+        if (optionAddr.isNotNull()) {
+            int optSize = optionAddr.getValue(0);      // Size of the option struct.
+            if (optSize >= 16) {
+	            argSize = optionAddr.getValue(4);      // Size of memory required for arguments.
+	            argAddr = optionAddr.getValue(8);      // Arguments (memory area of size argSize).
+	            int keyAddr = optionAddr.getValue(12); // Pointer to an encryption key (may not be used).
+
+	            if (log.isDebugEnabled()) {
+	            	log.debug(String.format("sceKernelLoadExec params: optSize=%d, argSize=%d, argAddr=0x%08X, keyAddr=0x%08X: %s", optSize, argSize, argAddr, keyAddr, Utilities.getMemoryDump(argAddr, argSize)));
+	            }
+
+            }
+        }
+
+        return hleKernelLoadExec(filename, argSize, argAddr);
     }
 
     @HLELogging(level="info")
@@ -183,7 +241,7 @@ public class LoadExecForUser extends HLEModule {
         	}
     		return SceKernelErrors.ERROR_KERNEL_NOT_FOUND_CALLBACK;
     	}
-    	int callbackArgument = callbackInfo.callback_arg_addr;
+    	int callbackArgument = callbackInfo.getCallbackArgument();
     	if (!Memory.isAddressGood(callbackArgument)) {
         	if (log.isDebugEnabled()) {
         		log.debug(String.format("LoadExecForUser_362A956B invalid address for callbackArgument=0x%08X", callbackArgument));

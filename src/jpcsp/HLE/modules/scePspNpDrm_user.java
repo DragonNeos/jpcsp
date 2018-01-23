@@ -22,6 +22,8 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 import jpcsp.GeneralJpcspException;
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLELogging;
@@ -34,6 +36,8 @@ import jpcsp.Loader;
 import jpcsp.crypto.CryptoEngine;
 import jpcsp.filesystems.SeekableDataInput;
 import jpcsp.filesystems.SeekableRandomFile;
+import jpcsp.HLE.BufferInfo.Usage;
+import jpcsp.HLE.VFS.IVirtualFile;
 import jpcsp.HLE.VFS.SeekableDataInputVirtualFile;
 import jpcsp.HLE.VFS.crypto.EDATVirtualFile;
 import jpcsp.HLE.VFS.crypto.PGDVirtualFile;
@@ -42,6 +46,7 @@ import jpcsp.HLE.kernel.types.SceKernelLMOption;
 import jpcsp.HLE.kernel.types.SceModule;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.modules.IoFileMgrForUser.IoInfo;
+import jpcsp.HLE.modules.ModuleMgrForUser.LoadModuleContext;
 import jpcsp.settings.AbstractBoolSettingsListener;
 
 import org.apache.log4j.Logger;
@@ -120,7 +125,7 @@ public class scePspNpDrm_user extends HLEModule {
                 SeekableRandomFile file = new SeekableRandomFile(pcfilename, "r");
 
                 String[] name = pcfilename.split("/");
-                String fName = "";
+                String fName = name[name.length - 1];
                 for (int i = 0; i < name.length; i++) {
                     if (name[i].toUpperCase().contains("EDAT")) {
                         fName = name[i];
@@ -191,7 +196,11 @@ public class scePspNpDrm_user extends HLEModule {
 
         // Check if the DLC decryption is enabled
         if (!getDisableDLCStatus()) {
-    		PGDVirtualFile pgdFile = new EDATVirtualFile(new SeekableDataInputVirtualFile(info.readOnlyFile));
+        	IVirtualFile vFile = info.vFile;
+        	if (vFile == null && info.readOnlyFile != null) {
+        		vFile = new SeekableDataInputVirtualFile(info.readOnlyFile);
+        	}
+    		PGDVirtualFile pgdFile = new EDATVirtualFile(vFile);
     		if (pgdFile.isValid()) {
     			info.vFile = pgdFile;
     		}
@@ -247,7 +256,14 @@ public class scePspNpDrm_user extends HLEModule {
             return SceKernelErrors.ERROR_NPDRM_INVALID_PERM;
         }
 
-        return Modules.ModuleMgrForUserModule.hleKernelLoadModule(path.getString(), flags, 0, lmOption, false, true);
+        LoadModuleContext loadModuleContext = new LoadModuleContext();
+        loadModuleContext.fileName = path.getString();
+        loadModuleContext.flags = flags;
+        loadModuleContext.lmOption = lmOption;
+        loadModuleContext.needModuleInfo = true;
+        loadModuleContext.allocMem = true;
+
+        return Modules.ModuleMgrForUserModule.hleKernelLoadModule(loadModuleContext);
     }
 
     @HLEFunction(nid = 0xAA5FC85B, version = 150, checkInsideInterrupt = true)
@@ -302,5 +318,35 @@ public class scePspNpDrm_user extends HLEModule {
         }
 
         return result;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xEBB198ED, version = 150)
+    public int sceNpDrmDecActivation(TPointer unknown1, TPointer unknown2) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x17E3F4BB, version = 150)
+    public int sceNpDrmVerifyAct(TPointer unknown) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x9A34AC9F, version = 150)
+    public int sceNpDrm_9A34AC9F(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=152, usage=Usage.in) TPointer rifAddr) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x0F9547E6, version = 150)
+    public int sceNpDrmGetVersionKey(TPointer unknown1, @CanBeNull TPointer unknown2, TPointer unknown3, int unknown4) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x2D88879A, version = 150)
+    public int sceNpDrm_2D88879A() {
+        return 0;
     }
 }

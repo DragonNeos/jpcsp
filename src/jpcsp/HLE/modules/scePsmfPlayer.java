@@ -151,6 +151,7 @@ public class scePsmfPlayer extends HLEModule {
     protected SysMemInfo ringbufferMem;
     protected int pmfFileDataRingbufferPosition;
     private static final int MAX_TIMESTAMP_DIFFERENCE = sceMpeg.audioTimestampStep * 2;
+    protected int lastMpegGetAtracAuResult;
 
     public int checkPlayerInitialized(int psmfPlayer) {
     	if (psmfPlayerStatus == PSMF_PLAYER_STATUS_NONE) {
@@ -187,7 +188,7 @@ public class scePsmfPlayer extends HLEModule {
     	int maxTimestampDifference = MAX_TIMESTAMP_DIFFERENCE;
 
     	// At video startup, allow for a longer timestamp difference to avoid audio stuttering.
-    	int firstTimestamp = Modules.sceMpegModule.getPsmfHeader().mpegFirstTimestamp;
+    	long firstTimestamp = Modules.sceMpegModule.getPsmfHeader().mpegFirstTimestamp;
     	if (getCurrentVideoTimestamp() < firstTimestamp + sceMpeg.videoTimestampStep * 10) {
     		maxTimestampDifference *= 2;
     	}
@@ -195,7 +196,7 @@ public class scePsmfPlayer extends HLEModule {
     	return maxTimestampDifference;
     }
 
-    protected int hlePsmfPlayerSetPsmf(int psmfPlayer, PspString fileAddr, int offset, boolean doCallbacks) {
+    protected int hlePsmfPlayerSetPsmf(int psmfPlayer, PspString fileAddr, int offset, boolean doCallbacks, boolean useSizeFromPsmfHeader) {
     	if (psmfPlayerStatus != PSMF_PLAYER_STATUS_INIT) {
     		return ERROR_PSMFPLAYER_NOT_INITIALIZED;
     	}
@@ -215,18 +216,23 @@ public class scePsmfPlayer extends HLEModule {
             SeekableDataInput psmfFile = Modules.IoFileMgrForUserModule.getFile(pmfFilePath, 0);
             psmfFile.seek(offset);
 
-            // Try to find the length of the PSMF file by reading the PSMF header
             int length = (int) psmfFile.length() - offset;
-            byte[] header = new byte[ISectorDevice.sectorLength];
-            psmfFile.readFully(header);
-            int psmfMagic = read32(null, 0, header, PSMF_MAGIC_OFFSET);
-            if (psmfMagic == PSMF_MAGIC) {
-            	// Found the PSMF header, extract the file size from the stream size and offset.
-            	length = endianSwap32(read32(null, 0, header, PSMF_STREAM_SIZE_OFFSET));
-            	length += endianSwap32(read32(null, 0, header, PSMF_STREAM_OFFSET_OFFSET));
-            	if (log.isDebugEnabled()) {
-            		log.debug(String.format("PSMF length=0x%X, header: %s", length, Utilities.getMemoryDump(header, 0, header.length)));
-            	}
+            // Some PSMF files have an incorrect size stored into their header.
+            // It seems that the PSP is ignoring this size when using scePsmfPlayerSetPsmf().
+            // However, the size is probably not ignored when using scePsmfPlayerSetPsmfOffset().
+            if (useSizeFromPsmfHeader) {
+                // Try to find the length of the PSMF file by reading the PSMF header
+	            byte[] header = new byte[ISectorDevice.sectorLength];
+	            psmfFile.readFully(header);
+	            int psmfMagic = read32(null, 0, header, PSMF_MAGIC_OFFSET);
+	            if (psmfMagic == PSMF_MAGIC) {
+	            	// Found the PSMF header, extract the file size from the stream size and offset.
+	            	length = endianSwap32(read32(null, 0, header, PSMF_STREAM_SIZE_OFFSET));
+	            	length += endianSwap32(read32(null, 0, header, PSMF_STREAM_OFFSET_OFFSET));
+	            	if (log.isDebugEnabled()) {
+	            		log.debug(String.format("PSMF length=0x%X, header: %s", length, Utilities.getMemoryDump(header, 0, header.length)));
+	            	}
+	            }
             }
 
             psmfFile.seek(offset);
@@ -251,6 +257,20 @@ public class scePsmfPlayer extends HLEModule {
         return 0;
     }
 
+    protected int getRemainingFileData() {
+        SceMpegRingbuffer ringbuffer = Modules.sceMpegModule.getMpegRingbuffer();
+    	int packetSize = ringbuffer.getPacketSize();
+    	int packetsInRingbuffer = ringbuffer.getPacketsInRingbuffer();
+    	int bytesInRingbuffer = packetsInRingbuffer * packetSize;
+    	int bytesRemainingInFileData = pmfFileData.length - pmfFileDataRingbufferPosition;
+    	int bytesRemaining = bytesRemainingInFileData + bytesInRingbuffer;
+    	if (log.isTraceEnabled()) {
+    		log.trace(String.format("getRemainingFileData packetsInRingbuffer=0x%X, bytesRemainingInFileData=0x%X, bytesRemaining=0x%X", packetsInRingbuffer, bytesRemainingInFileData, bytesRemaining));
+    	}
+
+    	return bytesRemaining;
+    }
+
     protected void hlePsmfFillRingbuffer(Memory mem) {
         SceMpegRingbuffer ringbuffer = Modules.sceMpegModule.getMpegRingbuffer();
         ringbuffer.notifyConsumed();
@@ -262,6 +282,7 @@ public class scePsmfPlayer extends HLEModule {
 
         	if (log.isTraceEnabled()) {
         		log.trace(String.format("Filling ringbuffer at 0x%08X, size=0x%X with file data from offset 0x%X", addr, size, pmfFileDataRingbufferPosition));
+        		log.trace(String.format("Ringbuffer putSequentialPackets=%d, file data length=0x%X, position=0x%X", ringbuffer.getPutSequentialPackets(), pmfFileData.length, pmfFileDataRingbufferPosition));
         	}
         	for (int i = 0; i < size; i++) {
         		mem.write8(addr + i, pmfFileData[pmfFileDataRingbufferPosition + i]);
@@ -328,12 +349,12 @@ public class scePsmfPlayer extends HLEModule {
 
     @HLEFunction(nid = 0x3D6D25A9, version = 150, checkInsideInterrupt = true)
     public int scePsmfPlayerSetPsmf(@CheckArgument("checkPlayerInitialized") int psmfPlayer, PspString fileAddr) {
-    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, 0, false);
+    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, 0, false, false);
     }
 
     @HLEFunction(nid = 0x58B83577, version = 150)
     public int scePsmfPlayerSetPsmfCB(@CheckArgument("checkPlayerInitialized") int psmfPlayer, PspString fileAddr) {
-    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, 0, true);
+    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, 0, true, false);
     }
 
     @HLEFunction(nid = 0xE792CD94, version = 150, checkInsideInterrupt = true)
@@ -379,6 +400,8 @@ public class scePsmfPlayer extends HLEModule {
         // Switch to PLAYING.
         psmfPlayerStatus = PSMF_PLAYER_STATUS_PLAYING;
 
+        lastMpegGetAtracAuResult = 0;
+
         return 0;
     }
 
@@ -403,8 +426,15 @@ public class scePsmfPlayer extends HLEModule {
     public int scePsmfPlayerUpdate(@CheckArgument("checkPlayerPlaying") int psmfPlayer) {
         // Can be called from interrupt.
         // Check playback status.
-        if (getCurrentVideoTimestamp() > Modules.sceMpegModule.psmfHeader.mpegLastTimestamp) {
-            // If we've reached the last timestamp, change the status to PLAYING_FINISHED.
+    	int remainingFileData = getRemainingFileData();
+    	if (log.isDebugEnabled()) {
+    		log.debug(String.format("scePsmfPlayerUpdate remainingFileData=0x%X", remainingFileData));
+    	}
+
+    	if (remainingFileData <= 0) {
+            // If we've reached the end of the file data, change the status to PLAYING_FINISHED.
+    		// Remark: do not use the PSMF header last timestamp as it may contain an incorrect
+    		//         value which seems to be ignored by the PSP.
             psmfPlayerStatus = PSMF_PLAYER_STATUS_PLAYING_FINISHED;
         }
 
@@ -448,7 +478,7 @@ public class scePsmfPlayer extends HLEModule {
             }
         }
 
-    	if (getCurrentAudioTimestamp() > 0 && getCurrentVideoTimestamp() > 0 && getCurrentVideoTimestamp() > getCurrentAudioTimestamp() + getMaxTimestampDifference()) {
+    	if (getCurrentAudioTimestamp() > 0 && getCurrentVideoTimestamp() > 0 && getCurrentVideoTimestamp() > getCurrentAudioTimestamp() + getMaxTimestampDifference() && lastMpegGetAtracAuResult == 0) {
     		//result = SceKernelErrors.ERROR_PSMFPLAYER_AUDIO_VIDEO_OUT_OF_SYNC;
     		Modules.sceMpegModule.writeLastFrameABGR(displayBuffer, videoDataFrameWidth, videoPixelMode);
     	} else {
@@ -457,9 +487,16 @@ public class scePsmfPlayer extends HLEModule {
 
 	    	// Retrieve the video Au
 	        result = Modules.sceMpegModule.hleMpegGetAvcAu(null);
-
-	    	// Write the video data
-	    	result = Modules.sceMpegModule.hleMpegAvcDecode(displayBuffer, videoDataFrameWidth, videoPixelMode, null, true);
+	        if (result < 0) {
+	        	// We have reached the end of the file...
+	        	if (pmfFileDataRingbufferPosition >= pmfFileData.length) {
+	                SceMpegRingbuffer ringbuffer = Modules.sceMpegModule.getMpegRingbuffer();
+	                ringbuffer.consumeAllPackets();
+	        	}
+	        } else {
+	        	// Write the video data
+	        	result = Modules.sceMpegModule.hleMpegAvcDecode(displayBuffer, videoDataFrameWidth, videoPixelMode, null, true, TPointer.NULL);
+	        }
     	}
 
         // Do not cache the video image as a texture in the VideoEngine to allow fluid rendering
@@ -488,7 +525,7 @@ public class scePsmfPlayer extends HLEModule {
     		return result;
     	}
 
-    	if (getCurrentAudioTimestamp() > 0 && getCurrentVideoTimestamp() > 0 && getCurrentAudioTimestamp() > getCurrentVideoTimestamp() + getMaxTimestampDifference()) {
+    	if (getCurrentAudioTimestamp() > 0 && getCurrentVideoTimestamp() > 0 && getCurrentAudioTimestamp() > getCurrentVideoTimestamp() + getMaxTimestampDifference() && lastMpegGetAtracAuResult == 0) {
     		result = SceKernelErrors.ERROR_PSMFPLAYER_AUDIO_VIDEO_OUT_OF_SYNC;
     	} else {
 	        // Check if the ringbuffer needs additional data
@@ -496,6 +533,7 @@ public class scePsmfPlayer extends HLEModule {
 
 	    	// Retrieve the audio Au
 	        result = Modules.sceMpegModule.hleMpegGetAtracAu(null);
+	        lastMpegGetAtracAuResult = result;
 
 	    	// Write the audio data
 	    	result = Modules.sceMpegModule.hleMpegAtracDecode(null, audioDataAddr, audioSamplesBytes);
@@ -631,12 +669,12 @@ public class scePsmfPlayer extends HLEModule {
 
     @HLEFunction(nid = 0x76C0F4AE, version = 150)
     public int scePsmfPlayerSetPsmfOffset(@CheckArgument("checkPlayerInitialized") int psmfPlayer, PspString fileAddr, int offset) {
-    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, offset, false);
+    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, offset, false, true);
     }
 
     @HLEFunction(nid = 0xA72DB4F9, version = 150)
     public int scePsmfPlayerSetPsmfOffsetCB(@CheckArgument("checkPlayerInitialized") int psmfPlayer, PspString fileAddr, int offset) {
-    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, offset, true);
+    	return hlePsmfPlayerSetPsmf(psmfPlayer, fileAddr, offset, true, true);
     }
 
     @HLEUnimplemented

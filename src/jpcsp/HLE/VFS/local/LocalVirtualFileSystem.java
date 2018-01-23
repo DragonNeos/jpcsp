@@ -25,6 +25,7 @@ import static jpcsp.HLE.modules.IoFileMgrForUser.PSP_O_WRONLY;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.Map;
 
 import jpcsp.Memory;
 import jpcsp.HLE.Modules;
@@ -37,7 +38,10 @@ import jpcsp.HLE.kernel.types.SceIoStat;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.SceKernelThreadInfo;
 import jpcsp.HLE.kernel.types.ScePspDateTime;
+import jpcsp.HLE.modules.IoFileMgrForUser;
 import jpcsp.HLE.modules.ThreadManForUser;
+import jpcsp.HLE.modules.IoFileMgrForUser.IoOperation;
+import jpcsp.HLE.modules.IoFileMgrForUser.IoOperationTiming;
 import jpcsp.filesystems.SeekableRandomFile;
 import jpcsp.hardware.MemoryStick;
 
@@ -48,13 +52,41 @@ public class LocalVirtualFileSystem extends AbstractVirtualFileSystem {
     // SeekableRandomFile doesn't support write only: take "rw",
     private final static String[] modeStrings = {"r", "r", "rw", "rw"};
 
+    /**
+     * Get the file name as returned from the memory stick.
+     * In some cases, the name is uppercased.
+     *
+     * The following cases have been tested:
+     * - "a"                => "A"
+     * - "B"                => "B"
+     * - "b.txt"            => "B.TXT"
+     * - "cC"               => "cC"
+     * - "LongFileName.txt" => "LongFileName.txt"
+     * - "aaaaaaaa"         => "AAAAAAAA"
+     * - "aaaaaaaa.aaa"     => "AAAAAAAA.AAA"
+     * - "aaaaaaaaa"        => "aaaaaaaaa"
+     * - "aaaaaaaa.aaaa"    => "aaaaaaaa.aaaa"
+     *
+     * It seems that file names in the format 8.3 only containing lowercase characters
+     * are converted to uppercase characters.
+     */
+    public static String getMsFileName(String fileName) {
+    	if (fileName == null) {
+    		return fileName;
+    	}
+    	if (fileName.matches("[^A-Z]{1,8}(\\.[^A-Z]{1,3})?")) {
+    		return fileName.toUpperCase();
+    	}
+    	return fileName;
+    }
+
 	public LocalVirtualFileSystem(String localPath, boolean useDirExtendedInfo) {
 		this.localPath = localPath;
 		this.useDirExtendedInfo = useDirExtendedInfo;
 	}
 
 	protected File getFile(String fileName) {
-		return new File(localPath + fileName);
+		return new File(fileName == null ? localPath : localPath + fileName);
 	}
 
 	protected static String getMode(int mode) {
@@ -154,7 +186,14 @@ public class LocalVirtualFileSystem extends AbstractVirtualFileSystem {
 			return null;
 		}
 
-		return file.list();
+    	String files[] = file.list();
+    	if (files != null) {
+        	for (int i = 0; i < files.length; i++) {
+        		files[i] = getMsFileName(files[i]);
+        	}
+    	}
+
+    	return files;
 	}
 
 	@Override
@@ -203,7 +242,7 @@ public class LocalVirtualFileSystem extends AbstractVirtualFileSystem {
         boolean successful = true;
 
         if ((bits & 0x0001) != 0) {	// Others execute permission
-            if (!file.setExecutable((mode & 0x0001) != 0)) {
+            if (!file.isDirectory() && !file.setExecutable((mode & 0x0001) != 0)) {
                 successful = false;
             }
         }
@@ -370,11 +409,24 @@ public class LocalVirtualFileSystem extends AbstractVirtualFileSystem {
 	            }
 	            break;
 	        }
+	        case 0x00005802: {
+	        	if (!"flash1:".equals(deviceName) || inputLength != 0 || outputLength != 0) {
+	        		result = IO_ERROR;
+	        	} else {
+	        		result = 0;
+	        	}
+	        	break;
+	        }
 	        default: {
 	        	result = super.ioDevctl(deviceName, command, inputPointer, inputLength, outputPointer, outputLength);
 	        }
 		}
 
 		return result;
+	}
+
+	@Override
+	public Map<IoOperation, IoOperationTiming> getTimings() {
+		return IoFileMgrForUser.noDelayTimings;
 	}
 }

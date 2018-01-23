@@ -36,6 +36,7 @@ import jpcsp.HLE.VFS.IVirtualFileSystem;
 import jpcsp.crypto.CryptoEngine;
 import jpcsp.filesystems.SeekableDataInput;
 import jpcsp.filesystems.SeekableRandomFile;
+import jpcsp.format.PNG;
 import jpcsp.format.PSF;
 import jpcsp.hardware.MemoryStick;
 import jpcsp.settings.Settings;
@@ -43,8 +44,11 @@ import jpcsp.util.Utilities;
 
 public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
 
-    public final static String savedataPath = "ms0:/PSP/SAVEDATA/";
-    public final static String savedataFilePath = "ms0/PSP/SAVEDATA/";
+	// Value returned in "base.error" when the load/save has been cancelled by the user
+	public final static int ERROR_SAVEDATA_CANCELLED = 1;
+
+	public final static String savedataPath = "ms0:/PSP/SAVEDATA/";
+    public final static String savedataFilePath = Settings.getInstance().getDirectoryMapping("ms0") + "PSP/SAVEDATA/";
     public final static String icon0FileName = "ICON0.PNG";
     public final static String icon1PNGFileName = "ICON1.PNG";
     public final static String icon1PMFFileName = "ICON1.PMF";
@@ -562,8 +566,10 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
     public void load(Memory mem) throws IOException {
         String path = getBasePath();
 
-        // Read main data.
-        if (checkParamSFOEncryption(path, paramSfoFileName)) {
+        // Read the main data.
+        // The data has to be decrypted if the SFO is marked for encryption and
+        // the file is listed in the SFO as a secure file (SAVEDATA_FILE_LIST).
+        if (checkParamSFOEncryption(path, paramSfoFileName) && isSecureFile(fileName)) {
             dataSize = loadEncryptedFile(mem, path, fileName, dataBuf, dataBufSize, key);
         } else {
             dataSize = loadFile(mem, path, fileName, dataBuf, dataBufSize);
@@ -608,10 +614,6 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
         }
     }
 
-    public void save(Memory mem) throws IOException {
-        save(mem, false);
-    }
-
     public void save(Memory mem, boolean secure) throws IOException {
         String path = getBasePath();
 
@@ -621,7 +623,7 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
         byte[] sdkey = key;
 
         // Write main data.
-        if (CryptoEngine.getSavedataCryptoStatus()) {
+        if (CryptoEngine.getSavedataCryptoStatus() && secure) {
             if (CryptoEngine.getExtractSavedataKeyStatus()) {
                 String tmpPath = Settings.getInstance().getDiscTmpDirectory();
                 new File(tmpPath).mkdirs();
@@ -635,7 +637,7 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
         }
 
         // Write ICON0.PNG
-        writeFile(mem, path, icon0FileName, icon0FileData.buf, icon0FileData.size);
+        writePNG(mem, path, icon0FileName, icon0FileData.buf, icon0FileData.size);
 
         // Check and write ICON1.PMF or ICON1.PNG
         IMemoryReader memoryReader = MemoryReader.getMemoryReader(icon1FileData.buf, 1);
@@ -645,10 +647,10 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
         } else {
             icon1FileName = icon1PNGFileName;
         }
-        writeFile(mem, path, icon1FileName, icon1FileData.buf, icon1FileData.size);
+        writePNG(mem, path, icon1FileName, icon1FileData.buf, icon1FileData.size);
 
         // Write PIC1.PNG
-        writeFile(mem, path, pic1FileName, pic1FileData.buf, pic1FileData.size);
+        writePNG(mem, path, pic1FileName, pic1FileData.buf, pic1FileData.size);
 
         // Write SND0.AT3
         writeFile(mem, path, snd0FileName, snd0FileData.buf, snd0FileData.size);
@@ -771,6 +773,14 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
         		fileOutput.close();
         	}
         }
+    }
+
+    private void writePNG(Memory mem, String path, String name, int address, int length) throws IOException {
+		// The PSP is saving only the real size of the PNG file,
+    	// which could be smaller than the buffer size
+		length = PNG.getEndOfPNG(mem, address, length);
+
+    	writeFile(mem, path, name, address, length);
     }
 
     private boolean checkParamSFOEncryption(String path, String name) throws IOException {
@@ -1088,42 +1098,6 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
         return false;
     }
 
-    /**
-     * Check if the given file has been created before r3306.
-     *
-     * @return true if the file exists and has been created before r3306. false
-     * otherwise.
-     */
-    private boolean isPreR3306(String fileName) {
-        SceIoStat stat = Modules.IoFileMgrForUserModule.statFile(getBasePath() + fileName);
-        if (stat == null) {
-            return false;
-        }
-        ScePspDateTime mtime = stat.mtime;
-        if (mtime == null) {
-            return false;
-        }
-
-        // r3306 has been released on Jul 12, 2013
-        if (mtime.year < 2013) {
-            return true;
-        }
-        if (mtime.year > 2013) {
-            return false;
-        }
-        // mtime.year == 2013
-
-        if (mtime.month < 7) {
-            return true;
-        }
-        if (mtime.month > 7) {
-            return false;
-        }
-        // mtime.year == 2013 && mtime.month == 7
-
-        return mtime.day < 12;
-    }
-
     private PspUtilitySavedataSecureFileList getSecureFileList(String fileName) {
         PSF psf = null;
         try {
@@ -1136,35 +1110,14 @@ public class SceUtilitySavedataParam extends pspUtilityBaseDialog {
         }
 
         Object savedataFileList = psf.get("SAVEDATA_FILE_LIST");
-
-        boolean addFileName = false;
-        if (fileName != null && isPreR3306(fileName)) {
-            // Before r3306, there was no SAVEDATA_FILE_LIST and all files were considered as secure.
-            addFileName = true;
+        if (savedataFileList == null || !(savedataFileList instanceof byte[])) {
+            return null;
         }
 
         PspUtilitySavedataSecureFileList fileList = null;
-        if (savedataFileList == null) {
-            if (!addFileName) {
-                return null;
-            }
-        } else {
-            if (!(savedataFileList instanceof byte[])) {
-                return null;
-            }
-        }
-
         if (savedataFileList != null) {
             fileList = new PspUtilitySavedataSecureFileList();
             fileList.read((byte[]) savedataFileList);
-        }
-
-        // Do we need to add the current fileName to the secure file list?
-        if (addFileName) {
-            if (fileList == null) {
-                fileList = new PspUtilitySavedataSecureFileList();
-            }
-            fileList.add(fileName, null);
         }
 
         return fileList;

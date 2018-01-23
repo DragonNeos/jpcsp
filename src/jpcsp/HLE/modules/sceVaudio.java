@@ -16,6 +16,9 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.HLE.modules;
 
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CheckArgument;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
@@ -116,23 +119,7 @@ public class sceVaudio extends HLEModule {
     	return sceAudio.changeChannelVolume(channel, leftvol, rightvol);
     }
 
-    @HLEFunction(nid = 0x67585DFD, version = 150, checkInsideInterrupt = true)
-    public int sceVaudioChRelease() {
-        if (!pspVaudio1Channel.isReserved()) {
-        	return SceKernelErrors.ERROR_AUDIO_CHANNEL_NOT_RESERVED;
-        }
-
-        pspVaudioChannelReserved = false;
-        pspVaudio1Channel.release();
-        pspVaudio1Channel.setReserved(false);
-        pspVaudio2Channel.release();
-        pspVaudio2Channel.setReserved(false);
-
-        return 0;
-    }
-
-    @HLEFunction(nid = 0x03B6807D, version = 150, checkInsideInterrupt = true)
-    public int sceVaudioChReserve(@CheckArgument("checkSampleCount") int sampleCount, @CheckArgument("checkFrequency") int freq, @CheckArgument("checkChannelCount") int format) {
+    protected int hleVaudioChReserve(int sampleCount, int freq, int format, boolean buffering) {
     	// Returning a different error code if the channel has been reserved by sceVaudioChReserve or by sceAudioSRCChReserve
     	if (pspVaudioChannelReserved) {
         	return SceKernelErrors.ERROR_BUSY;
@@ -159,8 +146,28 @@ public class sceVaudio extends HLEModule {
         return 0;
     }
 
+    @HLEFunction(nid = 0x67585DFD, version = 150, checkInsideInterrupt = true)
+    public int sceVaudioChRelease() {
+        if (!pspVaudio1Channel.isReserved()) {
+        	return SceKernelErrors.ERROR_AUDIO_CHANNEL_NOT_RESERVED;
+        }
+
+        pspVaudioChannelReserved = false;
+        pspVaudio1Channel.release();
+        pspVaudio1Channel.setReserved(false);
+        pspVaudio2Channel.release();
+        pspVaudio2Channel.setReserved(false);
+
+        return 0;
+    }
+
+    @HLEFunction(nid = 0x03B6807D, version = 150, checkInsideInterrupt = true)
+    public int sceVaudioChReserve(@CheckArgument("checkSampleCount") int sampleCount, @CheckArgument("checkFrequency") int freq, @CheckArgument("checkChannelCount") int format) {
+    	return hleVaudioChReserve(sampleCount, freq, format, false);
+    }
+
     @HLEFunction(nid = 0x8986295E, version = 150, checkInsideInterrupt = true)
-    public int sceVaudioOutputBlocking(int vol, TPointer buf) {
+    public int sceVaudioOutputBlocking(int vol, @BufferInfo(lengthInfo=LengthInfo.fixedLength, length=32, usage=Usage.in) TPointer buf) {
     	int result = 0;
 
     	SoundChannel pspVaudioChannel = Modules.sceAudioModule.getFreeSRCChannel();
@@ -196,5 +203,24 @@ public class sceVaudio extends HLEModule {
     @HLEFunction(nid = 0xCBD4AC51, version = 150, checkInsideInterrupt = true)
     public int sceVaudioSetAlcMode(int alcMode) {
     	return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xE8E78DC8, version = 150)
+    public int sceVaudio_E8E78DC8(@CheckArgument("checkSampleCount") int sampleCount, @CheckArgument("checkFrequency") int freq, @CheckArgument("checkChannelCount") int format) {
+    	// What is the difference with sceVaudioChReserveBuffering?
+    	return hleVaudioChReserve(sampleCount, freq, format, true);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x504E4745, version = 150)
+    public int sceVaudio_504E4745(int unknown) {
+    	return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x27ACC20B, version = 150)
+    public int  sceVaudioChReserveBuffering(@CheckArgument("checkSampleCount") int sampleCount, @CheckArgument("checkFrequency") int freq, @CheckArgument("checkChannelCount") int format) {
+    	return hleVaudioChReserve(sampleCount, freq, format, true);
     }
 }

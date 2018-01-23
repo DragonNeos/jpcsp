@@ -77,6 +77,7 @@ public interface ICompilerContext {
     public void storeVtInt(int n);
     public void storeVtInt(int vsize, int n);
     public void storeVtInt(int vsize, int vt, int n);
+    public void storeRegister(int reg, int constantValue);
     public void storeHilo();
     public void storeFCr();
     public void storeFcr31c();
@@ -172,4 +173,10 @@ public interface ICompilerContext {
     public void skipInstructions(int numberInstructionsToBeSkipped, boolean skipDelaySlot);
     public boolean compileSWsequence(int baseRegister, int[] offsets, int[] registers);
     public boolean compileLWsequence(int baseRegister, int[] offsets, int[] registers);
+    public void storePc();
+    public void loadLocalVar(int localVar);
+    public void loadProcessor();
+    public boolean hasNoPfx();
+    public void loadVprInt();
+    public void loadVprFloat();
 }

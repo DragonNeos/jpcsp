@@ -28,9 +28,12 @@ import java.util.Date;
 import java.util.HashMap;
 
 import jpcsp.Emulator;
+import jpcsp.HLE.VFS.local.LocalVirtualFile;
+import jpcsp.filesystems.SeekableRandomFile;
 import jpcsp.filesystems.umdiso.iso9660.Iso9660Directory;
 import jpcsp.filesystems.umdiso.iso9660.Iso9660File;
 import jpcsp.filesystems.umdiso.iso9660.Iso9660Handler;
+import jpcsp.format.PBP;
 import jpcsp.settings.Settings;
 import jpcsp.util.Utilities;
 
@@ -46,11 +49,21 @@ public class UmdIsoReader implements IBrowser {
     private IBrowser browser;
     private final HashMap<String, Iso9660File> fileCache = new HashMap<String, Iso9660File>();
     private final HashMap<String, Iso9660Directory> dirCache = new HashMap<String, Iso9660Directory>();
-    private final int numSectors;
+    private int numSectors;
     private static boolean doIsoBuffering = false;
     private boolean hasJolietExtension;
+    private boolean isPBP;
 
     public UmdIsoReader(String umdFilename) throws IOException, FileNotFoundException {
+    	init(umdFilename, doIsoBuffering);
+    }
+
+    public UmdIsoReader(String umdFilename, boolean doIsoBuffering) throws IOException, FileNotFoundException {
+    	init(umdFilename, doIsoBuffering);
+    }
+
+    private void init(String umdFilename, boolean doIsoBuffering) throws IOException, FileNotFoundException {
+    	isPBP = false;
     	if (umdFilename == null && doIsoBuffering) {
     		sectorDevice = null;
     	} else {
@@ -65,6 +78,7 @@ public class UmdIsoReader implements IBrowser {
 	            sectorDevice = new CSOFileSectorDevice(fileReader, header);
 	        } else if (header[0] == 0 && header[1] == 'P' && header[2] == 'B' && header[3] == 'P') {
 	        	sectorDevice = new PBPFileSectorDevice(fileReader);
+	        	isPBP = true;
 	        } else {
 	            sectorDevice = new ISOFileSectorDevice(fileReader);
 	        }
@@ -138,6 +152,10 @@ public class UmdIsoReader implements IBrowser {
 
     public int getNumSectors() {
         return numSectors;
+    }
+
+    public ISectorDevice getSectorDevice() {
+    	return sectorDevice;
     }
 
     /**
@@ -591,5 +609,9 @@ public class UmdIsoReader implements IBrowser {
 			return browser.readPsarData();
 		}
 		return null;
+	}
+
+	public boolean isPBP() {
+		return isPBP;
 	}
 }

@@ -17,6 +17,7 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
 package jpcsp.HLE.VFS;
 
 import java.io.IOException;
+import java.util.Map;
 
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
@@ -24,6 +25,9 @@ import org.apache.log4j.Logger;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.TPointer;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
+import jpcsp.HLE.modules.IoFileMgrForUser;
+import jpcsp.HLE.modules.IoFileMgrForUser.IoOperation;
+import jpcsp.HLE.modules.IoFileMgrForUser.IoOperationTiming;
 import jpcsp.filesystems.SeekableDataInput;
 import jpcsp.util.Utilities;
 
@@ -31,9 +35,16 @@ public abstract class AbstractVirtualFile implements IVirtualFile {
 	protected static Logger log = AbstractVirtualFileSystem.log;
 	protected final SeekableDataInput file;
 	protected static final int IO_ERROR = AbstractVirtualFileSystem.IO_ERROR;
+	private final IVirtualFile ioctlFile;
 
 	public AbstractVirtualFile(SeekableDataInput file) {
 		this.file = file;
+		ioctlFile = null;
+	}
+
+	public AbstractVirtualFile(SeekableDataInput file, IVirtualFile ioctlFile) {
+		this.file = file;
+		this.ioctlFile = ioctlFile;
 	}
 
 	@Override
@@ -127,6 +138,10 @@ public abstract class AbstractVirtualFile implements IVirtualFile {
 
 	@Override
 	public int ioIoctl(int command, TPointer inputPointer, int inputLength, TPointer outputPointer, int outputLength) {
+		if (ioctlFile != null) {
+			return ioctlFile.ioIoctl(command, inputPointer, inputLength, outputPointer, outputLength);
+		}
+
 		if (log.isEnabledFor(Level.WARN)) {
 	        log.warn(String.format("ioIoctl 0x%08X unsupported command, inlen=%d, outlen=%d", command, inputLength, outputLength));
 	        if (inputPointer.isAddressGood()) {
@@ -161,6 +176,11 @@ public abstract class AbstractVirtualFile implements IVirtualFile {
 	@Override
 	public IVirtualFile duplicate() {
 		return null;
+	}
+
+	@Override
+	public Map<IoOperation, IoOperationTiming> getTimings() {
+		return IoFileMgrForUser.defaultTimings;
 	}
 
     @Override

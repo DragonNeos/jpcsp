@@ -20,6 +20,7 @@ import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.CheckArgument;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
+import jpcsp.HLE.HLEUnimplemented;
 import jpcsp.HLE.SceKernelErrorException;
 import jpcsp.HLE.TPointer;
 
@@ -46,6 +47,9 @@ import jpcsp.HLE.kernel.types.interrupts.GeInterruptHandler;
 import jpcsp.graphics.GeCommands;
 import jpcsp.graphics.VideoEngine;
 import jpcsp.graphics.RE.externalge.ExternalGE;
+import jpcsp.memory.IMemoryReader;
+import jpcsp.memory.MemoryReader;
+import jpcsp.util.Utilities;
 
 import org.apache.log4j.Logger;
 
@@ -168,11 +172,11 @@ public class sceGe_user extends HLEModule {
 
     private void triggerAsyncCallback(int cbid, int listId, int listPc, int behavior, int signalId, HashMap<Integer, SceKernelCallbackInfo> callbacks) {
     	SceKernelCallbackInfo callback = callbacks.get(cbid);
-    	if (callback != null && callback.callback_addr != 0) {
+    	if (callback != null && callback.hasCallbackFunction()) {
     		if (log.isDebugEnabled()) {
     			log.debug(String.format("Scheduling Async Callback %s, listId=0x%X, listPc=0x%08X, behavior=%d, signalId=0x%X", callback.toString(), listId, listPc, behavior, signalId));
     		}
-    		GeCallbackInterruptHandler geCallbackInterruptHandler = new GeCallbackInterruptHandler(callback.callback_addr, callback.callback_arg_addr, listPc);
+    		GeCallbackInterruptHandler geCallbackInterruptHandler = new GeCallbackInterruptHandler(callback.getCallbackFunction(), callback.getCallbackArgument(), listPc);
     		GeInterruptHandler geInterruptHandler = new GeInterruptHandler(geCallbackInterruptHandler, listId, behavior, signalId);
     		Emulator.getScheduler().addAction(geInterruptHandler);
     	} else {
@@ -372,11 +376,13 @@ public class sceGe_user extends HLEModule {
 	    	optParams = new pspGeListOptParam();
 	        optParams.read(argAddr);
 	        stackAddr = optParams.stackAddr;
+	        saveContextAddr = optParams.contextAddr;
 	        if (log.isDebugEnabled()) {
 	        	log.debug(String.format("hleGeListEnQueue optParams=%s", optParams));
 	        }
     	}
 
+    	boolean useCachedMemory = false;
     	if (Modules.SysMemUserForUserModule.hleKernelGetCompiledSdkVersion() >= 0x02000000) {
 	        boolean isBusy;
 	    	if (ExternalGE.isActive()) {
@@ -388,9 +394,22 @@ public class sceGe_user extends HLEModule {
 	    		log.warn(String.format("hleGeListEnQueue can't enqueue duplicate list address %s, stack 0x%08X", listAddr, stackAddr));
 	    		return SceKernelErrors.ERROR_BUSY;
 	    	}
+    	} else {
+    		// Old games (i.e. having PSP SDK version < 2.00) are sometimes
+    		// reusing the same address for multiple lists, without waiting
+    		// for the previous list to complete. They assume that the lists
+    		// are being executed quite quickly, which is not the case when
+    		// using the OpenGL rendering engine. There is some delay before
+    		// the OpenGL frame refresh is being processed.
+    		useCachedMemory = true;
     	}
 
-        int result;
+    	// No need to cache any memory when using the external software renderer
+    	if (ExternalGE.isActive()) {
+    		useCachedMemory = false;
+    	}
+
+    	int result;
     	synchronized (this) {
 	    	PspGeList list = listFreeQueue.poll();
 	    	if (list == null) {
@@ -405,6 +424,9 @@ public class sceGe_user extends HLEModule {
 
 	    	list.init(listAddr.getAddress(), stallAddr.getAddress(), cbid, optParams);
 	    	list.setSaveContextAddr(saveContextAddr);
+	    	if (useCachedMemory) {
+	    		setStallAddressWithCachedMemory(list, stallAddr.getAddress());
+	    	}
 	    	if (enqueueHead) {
 	        	// Send the list to the VideoEngine at the head of the queue.
 	        	list.startListHead();
@@ -436,6 +458,38 @@ public class sceGe_user extends HLEModule {
 		}
 
     	return result;
+    }
+
+    private void setStallAddressWithCachedMemory(PspGeList list, int stallAddr) {
+		int startAddress = list.list_addr;
+		int length;
+		if (stallAddr != 0) {
+			length = stallAddr - startAddress;
+		} else {
+			// The list has no stall address, scan for the FINISH command
+			IMemoryReader memoryReader = MemoryReader.getMemoryReader(startAddress, 4);
+			length = 0;
+			while (true) {
+				int instruction = memoryReader.readNext();
+				int command = VideoEngine.command(instruction);
+				if (command == GeCommands.FINISH) {
+					// Add 4 to include the END command that follows the FINISH command
+					length = memoryReader.getCurrentAddress() - startAddress + 4;
+					break;
+				}
+			}
+		}
+
+		if (length >= 0) {
+			int[] baseMemoryInts = Utilities.readInt32(startAddress, length);
+			list.setStallAddr(stallAddr, MemoryReader.getMemoryReader(startAddress, baseMemoryInts, 0, length), startAddress, startAddress + length);
+
+			if (log.isDebugEnabled()) {
+				log.debug(String.format("setStallAddressWithCachedMemory [0x%08X-0x%08X] %s", startAddress, startAddress + length, list));
+			}
+		} else {
+			list.setStallAddr(stallAddr);
+		}
     }
 
     @HLEFunction(nid = 0x1F6752AD, version = 150)
@@ -550,7 +604,11 @@ public class sceGe_user extends HLEModule {
     	synchronized (this) {
         	PspGeList list = allGeLists[id];
         	if (list.getStallAddr() != stallAddr.getAddress()) {
-        		list.setStallAddr(stallAddr.getAddress());
+        		if (list.hasBaseMemoryReader()) {
+        			setStallAddressWithCachedMemory(list, stallAddr.getAddress());
+        		} else {
+        			list.setStallAddr(stallAddr.getAddress());
+        		}
                 Modules.sceDisplayModule.setGeDirty(true);
         	}
 		}
@@ -582,7 +640,7 @@ public class sceGe_user extends HLEModule {
         		result = 0;
         		blockCurrentThread = true;
         	} else {
-        		result = list.status;
+        		result = list.getSyncStatus();
         	}
 		}
 
@@ -629,7 +687,7 @@ public class sceGe_user extends HLEModule {
         		currentList = VideoEngine.getInstance().getFirstDrawList();
         	}
             if (currentList != null) {
-                result = currentList.status;
+                result = currentList.getSyncStatus();
             }
             if (log.isDebugEnabled()) {
             	log.debug(String.format("sceGeDrawSync mode=%d, returning %d", mode, result));
@@ -725,13 +783,36 @@ public class sceGe_user extends HLEModule {
         SceKernelCallbackInfo callbackSignal = signalCallbacks.remove(cbid);
         SceKernelCallbackInfo callbackFinish = finishCallbacks.remove(cbid);
         if (callbackSignal != null) {
-            threadMan.hleKernelDeleteCallback(callbackSignal.uid);
+            threadMan.hleKernelDeleteCallback(callbackSignal.getUid());
         }
         if (callbackFinish != null) {
-            threadMan.hleKernelDeleteCallback(callbackFinish.uid);
+            threadMan.hleKernelDeleteCallback(callbackFinish.getUid());
         }
         SceUidManager.releaseId(cbid, geCallbackPurpose);
 
         return 0;
+    }
+
+    /**
+     * Sets the EDRAM size.
+     *
+     * @param size The size (0x200000 or 0x400000).
+     *
+     * @return Zero on success, otherwise less than zero.
+     */
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x5BAA5439, version = 150)
+    public int sceGeEdramSetSize(int size) {
+    	return 0;
+    }
+
+    /**
+     * Gets the EDRAM physical size.
+     *
+     * @return The EDRAM physical size.
+     */
+    @HLEFunction(nid = 0x547EC5F0, version = 660)
+    public int sceGeEdramGetHwSize() {
+    	return MemoryMap.SIZE_VRAM;
     }
 }

@@ -16,6 +16,9 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.HLE.modules;
 
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.CheckArgument;
 import jpcsp.HLE.HLEFunction;
@@ -59,28 +62,28 @@ public class sceCtrl extends HLEModule {
     // IdleCancelThreshold
     private int idlereset;
     private int idleback;
-    public final static int PSP_CTRL_SELECT = 0x000001;
-    public final static int PSP_CTRL_START = 0x000008;
-    public final static int PSP_CTRL_UP = 0x000010;
-    public final static int PSP_CTRL_RIGHT = 0x000020;
-    public final static int PSP_CTRL_DOWN = 0x000040;
-    public final static int PSP_CTRL_LEFT = 0x000080;
-    public final static int PSP_CTRL_LTRIGGER = 0x000100;
-    public final static int PSP_CTRL_RTRIGGER = 0x000200;
-    public final static int PSP_CTRL_TRIANGLE = 0x001000;
-    public final static int PSP_CTRL_CIRCLE = 0x002000;
-    public final static int PSP_CTRL_CROSS = 0x004000;
-    public final static int PSP_CTRL_SQUARE = 0x008000;
-    public final static int PSP_CTRL_HOME = 0x010000;
-    public final static int PSP_CTRL_HOLD = 0x020000;
-    public final static int PSP_CTRL_NOTE = 0x800000;
-    public final static int PSP_CTRL_SCREEN = 0x400000;
-    public final static int PSP_CTRL_VOLUP = 0x100000;
-    public final static int PSP_CTRL_VOLDOWN = 0x200000;
-    public final static int PSP_CTRL_WLAN_UP = 0x040000;
-    public final static int PSP_CTRL_REMOTE = 0x080000;
-    public final static int PSP_CTRL_DISC = 0x1000000;
-    public final static int PSP_CTRL_MS = 0x2000000;
+    public final static int PSP_CTRL_SELECT   = 0x0000001;
+    public final static int PSP_CTRL_START    = 0x0000008;
+    public final static int PSP_CTRL_UP       = 0x0000010;
+    public final static int PSP_CTRL_RIGHT    = 0x0000020;
+    public final static int PSP_CTRL_DOWN     = 0x0000040;
+    public final static int PSP_CTRL_LEFT     = 0x0000080;
+    public final static int PSP_CTRL_LTRIGGER = 0x0000100;
+    public final static int PSP_CTRL_RTRIGGER = 0x0000200;
+    public final static int PSP_CTRL_TRIANGLE = 0x0001000;
+    public final static int PSP_CTRL_CIRCLE   = 0x0002000;
+    public final static int PSP_CTRL_CROSS    = 0x0004000;
+    public final static int PSP_CTRL_SQUARE   = 0x0008000;
+    public final static int PSP_CTRL_HOME     = 0x0010000;
+    public final static int PSP_CTRL_HOLD     = 0x0020000;
+    public final static int PSP_CTRL_WLAN_UP  = 0x0040000;
+    public final static int PSP_CTRL_REMOTE   = 0x0080000;
+    public final static int PSP_CTRL_VOLUP    = 0x0100000;
+    public final static int PSP_CTRL_VOLDOWN  = 0x0200000;
+    public final static int PSP_CTRL_SCREEN   = 0x0400000;
+    public final static int PSP_CTRL_NOTE     = 0x0800000;
+    public final static int PSP_CTRL_DISC     = 0x1000000;
+    public final static int PSP_CTRL_MS       = 0x2000000;
 
     // PspCtrlMode
     public final static int PSP_CTRL_MODE_DIGITAL = 0;
@@ -99,6 +102,10 @@ public class sceCtrl extends HLEModule {
             return true;
         }
         return false;
+    }
+
+    public void setSamplingMode(int mode) {
+    	this.mode = mode;
     }
 
     private static int getTimestamp() {
@@ -312,7 +319,7 @@ public class sceCtrl extends HLEModule {
     	return cycle;
     }
 
-    protected void hleCtrlExecuteSampling() {
+    public void hleCtrlExecuteSampling() {
         if (log.isDebugEnabled()) {
             log.debug("hleCtrlExecuteSampling");
         }
@@ -433,7 +440,7 @@ public class sceCtrl extends HLEModule {
     @HLEFunction(nid = 0x1F4011E6, version = 150, checkInsideInterrupt = true)
     public int sceCtrlSetSamplingMode(@CheckArgument("checkMode") int newMode) {
         int oldMode = mode;
-        this.mode = newMode;
+        setSamplingMode(newMode);
 
         if (log.isDebugEnabled()) {
             log.debug(String.format("sceCtrlSetSamplingMode mode=%d returning %d", newMode, oldMode));
@@ -450,22 +457,22 @@ public class sceCtrl extends HLEModule {
     }
 
     @HLEFunction(nid = 0x3A622550, version = 150)
-    public int sceCtrlPeekBufferPositive(TPointer dataAddr, int numBuf) {
+    public int sceCtrlPeekBufferPositive(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=16, usage=Usage.out) TPointer dataAddr, int numBuf) {
         return hleCtrlReadBufferImmediately(dataAddr.getAddress(), numBuf, true, true);
     }
 
     @HLEFunction(nid = 0xC152080A, version = 150)
-    public int sceCtrlPeekBufferNegative(TPointer dataAddr, int numBuf) {
+    public int sceCtrlPeekBufferNegative(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=16, usage=Usage.out) TPointer dataAddr, int numBuf) {
         return hleCtrlReadBufferImmediately(dataAddr.getAddress(), numBuf, false, true);
     }
 
     @HLEFunction(nid = 0x1F803938, version = 150, checkInsideInterrupt = true)
-    public int sceCtrlReadBufferPositive(TPointer dataAddr, int numBuf) {
+    public int sceCtrlReadBufferPositive(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=16, usage=Usage.out) TPointer dataAddr, int numBuf) {
         return hleCtrlReadBuffer(dataAddr.getAddress(), numBuf, true);
     }
 
     @HLEFunction(nid = 0x60B81F86, version = 150, checkInsideInterrupt = true)
-    public int sceCtrlReadBufferNegative(TPointer dataAddr, int numBuf) {
+    public int sceCtrlReadBufferNegative(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=16, usage=Usage.out) TPointer dataAddr, int numBuf) {
         return hleCtrlReadBuffer(dataAddr.getAddress(), numBuf, false);
     }
 
@@ -543,6 +550,47 @@ public class sceCtrl extends HLEModule {
 
     @HLEFunction(nid = 0xC4AAD55F, version = 371)
 	public int sceCtrlPeekBufferPositive371(TPointer dataAddr, int numBuf) {
-        return hleCtrlReadBufferImmediately(dataAddr.getAddress(), numBuf, true, true);
+    	return hleCtrlReadBufferImmediately(dataAddr.getAddress(), numBuf, true, true);
 	}
+
+    @HLEFunction(nid = 0x454455AC, version = 371)
+	public int sceCtrlReadBufferPositive371(TPointer dataAddr, int numBuf) {
+    	return hleCtrlReadBuffer(dataAddr.getAddress(), numBuf, true);
+	}
+
+    @HLEFunction(nid = 0xD073ECA4, version = 620)
+	public int sceCtrlReadBufferPositive_620(TPointer dataAddr, int numBuf) {
+    	return hleCtrlReadBuffer(dataAddr.getAddress(), numBuf, true);
+	}
+
+    @HLEFunction(nid = 0x9F3038AC, version = 639)
+	public int sceCtrlReadBufferPositive_639(TPointer dataAddr, int numBuf) {
+    	return hleCtrlReadBuffer(dataAddr.getAddress(), numBuf, true);
+	}
+
+    @HLEFunction(nid = 0xBE30CED0, version = 660)
+	public int sceCtrlReadBufferPositive_660(TPointer dataAddr, int numBuf) {
+    	return hleCtrlReadBuffer(dataAddr.getAddress(), numBuf, true);
+	}
+
+    @HLEFunction(nid = 0xF6E94EA3, version = 150, checkInsideInterrupt = true)
+    public int sceCtrlSetSamplingMode_660(@CheckArgument("checkMode") int newMode) {
+    	return sceCtrlSetSamplingMode(newMode);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x6C86AF22, version = 660)
+	public int sceCtrl_driver_6C86AF22(int unknown) {
+    	return 0;
+	}
+
+    @HLEFunction(nid = 0x2BA616AF, version = 150)
+	public int sceCtrlPeekBufferPositive_660(TPointer dataAddr, int numBuf) {
+    	return sceCtrlPeekBufferPositive371(dataAddr, numBuf);
+	}
+
+    @HLEFunction(nid = 0xF8EC18BD, version = 150)
+    public int sceCtrlGetSamplingMode_660(TPointer32 modeAddr) {
+    	return sceCtrlGetSamplingMode(modeAddr);
+    }
 }

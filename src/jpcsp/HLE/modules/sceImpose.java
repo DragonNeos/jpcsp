@@ -22,6 +22,7 @@ import jpcsp.HLE.HLEUnimplemented;
 import jpcsp.HLE.TPointer32;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
+import jpcsp.hardware.Audio;
 import jpcsp.hardware.Battery;
 import jpcsp.settings.Settings;
 
@@ -70,10 +71,28 @@ public class sceImpose extends HLEModule {
 	public static final int PSP_IMPOSE_TIME_FORMAT            = 0x20;
 	public static final int PSP_IMPOSE_DATE_FORMAT            = 0x40;
 	public static final int PSP_IMPOSE_LANGUAGE               = 0x80;
+	public static final int PSP_IMPOSE_00000100               = 0x100;
 	public static final int PSP_IMPOSE_BACKLIGHT_OFF_INTERVAL = 0x200;
 	public static final int PSP_IMPOSE_SOUND_REDUCTION        = 0x400;
 	public static final int PSP_IMPOSE_UMD_POPUP_ENABLED      = 1;
 	public static final int PSP_IMPOSE_UMD_POPUP_DISABLED     = 0;
+	public static final int PSP_IMPOSE_20000000               = 0x20000000;
+	public static final int PSP_IMPOSE_80000001               = 0x80000001;
+	public static final int PSP_IMPOSE_80000002               = 0x80000002;
+	public static final int PSP_IMPOSE_80000003               = 0x80000003;
+	public static final int PSP_IMPOSE_80000004               = 0x80000004;
+	public static final int PSP_IMPOSE_80000005               = 0x80000005;
+	public static final int PSP_IMPOSE_80000006               = 0x80000006;
+	public static final int PSP_IMPOSE_80000007               = 0x80000007;
+	public static final int PSP_IMPOSE_80000008               = 0x80000008;
+	public static final int PSP_IMPOSE_80000009               = 0x80000009;
+	public static final int PSP_IMPOSE_8000000A               = 0x8000000A;
+	public static final int PSP_IMPOSE_8000000B               = 0x8000000B;
+
+	private int imposeChanges = 0;
+	private int impose80000004 = 0;
+	private int impose80000007 = 0;
+	private int imposeAvls = 1;
 
     @HLEUnimplemented
 	@HLEFunction(nid = 0x381BD9E7, version = 150)
@@ -171,17 +190,48 @@ public class sceImpose extends HLEModule {
 		switch (param) {
 			case PSP_IMPOSE_MAIN_VOLUME:
 				// Return value [0..30]?
-				value = 30;
+				if (Audio.isMuted()) {
+					value = 0;
+				} else {
+					value = 30;
+				}
+				break;
+			case PSP_IMPOSE_SOUND_REDUCTION:
+				value = 0;
+				break;
+			case PSP_IMPOSE_MUTE:
+				value = Audio.isMuted() ? 1 : 0;
+				break;
+			case PSP_IMPOSE_AVLS:
+				value = imposeAvls;
+				break;
+			case PSP_IMPOSE_BACKLIGHT_OFF_INTERVAL:
+				value = 0;
+				break;
+			case PSP_IMPOSE_20000000:
+				value = 0;
+				break;
+			case PSP_IMPOSE_80000004:
+				value = impose80000004;
+				break;
+			case PSP_IMPOSE_80000007:
+				value = impose80000007;
 				break;
 			case PSP_IMPOSE_BACKLIGHT_BRIGHTNESS:
 			case PSP_IMPOSE_EQUALIZER_MODE:
-			case PSP_IMPOSE_MUTE:
-			case PSP_IMPOSE_AVLS:
 			case PSP_IMPOSE_TIME_FORMAT:
 			case PSP_IMPOSE_DATE_FORMAT:
 			case PSP_IMPOSE_LANGUAGE:
-			case PSP_IMPOSE_BACKLIGHT_OFF_INTERVAL:
-			case PSP_IMPOSE_SOUND_REDUCTION:
+			case PSP_IMPOSE_00000100:
+			case PSP_IMPOSE_80000001:
+			case PSP_IMPOSE_80000002:
+			case PSP_IMPOSE_80000003:
+			case PSP_IMPOSE_80000005:
+			case PSP_IMPOSE_80000006:
+			case PSP_IMPOSE_80000008:
+			case PSP_IMPOSE_80000009:
+			case PSP_IMPOSE_8000000A:
+			case PSP_IMPOSE_8000000B:
 				log.warn(String.format("sceImposeGetParam param=0x%X not implemented", param));
 				break;
 			default:
@@ -196,15 +246,64 @@ public class sceImpose extends HLEModule {
 	public int sceImposeSetParam(int param, int value) {
 		switch (param) {
 			case PSP_IMPOSE_MAIN_VOLUME:
+				if (value < 0 || value >= 31) {
+					return SceKernelErrors.ERROR_INVALID_VALUE;
+				}
+				break;
+			case PSP_IMPOSE_MUTE:
+				if (value < 0 || value > 1) {
+					return SceKernelErrors.ERROR_INVALID_VALUE;
+				}
+				Audio.setMuted(value != 0);
+				imposeChanges |= PSP_IMPOSE_MUTE | PSP_IMPOSE_MAIN_VOLUME;
+				break;
+			case PSP_IMPOSE_AVLS:
+				if (value < 0 || value > 1) {
+					return SceKernelErrors.ERROR_INVALID_VALUE;
+				}
+				imposeAvls = value;
+				imposeChanges |= PSP_IMPOSE_AVLS | PSP_IMPOSE_MAIN_VOLUME;
+				break;
+			case PSP_IMPOSE_TIME_FORMAT:
+				imposeChanges |= PSP_IMPOSE_TIME_FORMAT;
+				break;
+			case PSP_IMPOSE_DATE_FORMAT:
+				imposeChanges |= PSP_IMPOSE_DATE_FORMAT;
+				break;
+			case PSP_IMPOSE_LANGUAGE:
+				if (value < 0 || value >= 12) {
+					return SceKernelErrors.ERROR_INVALID_VALUE;
+				}
+				imposeChanges |= PSP_IMPOSE_LANGUAGE;
+				break;
+			case PSP_IMPOSE_00000100:
+				if (value < 0 || value > 1) {
+					return SceKernelErrors.ERROR_INVALID_VALUE;
+				}
+				imposeChanges |= PSP_IMPOSE_00000100;
+				break;
+			case PSP_IMPOSE_80000004:
+				if (value < 0 || value > 1) {
+					return SceKernelErrors.ERROR_INVALID_VALUE;
+				}
+				impose80000004 = value;
+				break;
+			case PSP_IMPOSE_80000007:
+				impose80000007 = value;
+				break;
 			case PSP_IMPOSE_BACKLIGHT_BRIGHTNESS:
 			case PSP_IMPOSE_EQUALIZER_MODE:
-			case PSP_IMPOSE_MUTE:
-			case PSP_IMPOSE_AVLS:
-			case PSP_IMPOSE_TIME_FORMAT:
-			case PSP_IMPOSE_DATE_FORMAT:
-			case PSP_IMPOSE_LANGUAGE:
 			case PSP_IMPOSE_BACKLIGHT_OFF_INTERVAL:
 			case PSP_IMPOSE_SOUND_REDUCTION:
+			case PSP_IMPOSE_80000001:
+			case PSP_IMPOSE_80000002:
+			case PSP_IMPOSE_80000003:
+			case PSP_IMPOSE_80000005:
+			case PSP_IMPOSE_80000006:
+			case PSP_IMPOSE_80000008:
+			case PSP_IMPOSE_80000009:
+			case PSP_IMPOSE_8000000A:
+			case PSP_IMPOSE_8000000B:
 				log.warn(String.format("sceImposeSetParam param=0x%X, value=0x%X not implemented", param, value));
 				break;
 			default:
@@ -212,6 +311,72 @@ public class sceImpose extends HLEModule {
 				return SceKernelErrors.ERROR_INVALID_MODE;
 		}
 
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x116DDED6, version = 150)
+	public int sceImposeSetVideoOutMode(int mode, int width, int height) {
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xBB12F974, version = 150)
+	public int sceImposeSetStatus(int status) {
+		return 0;
+	}
+
+	@HLEFunction(nid = 0xDC3BECFF, version = 660)
+	public int sceImposeGetParam_660(int param) {
+		return sceImposeGetParam(param);
+	}
+
+	@HLEFunction(nid = 0x3C318569, version = 660)
+	public int sceImposeSetParam_660(int param, int value) {
+		return sceImposeSetParam(param, value);
+	}
+
+	@HLEFunction(nid = 0xB415FC59, version = 150)
+	public int sceImposeChanges() {
+		// Has no parameters
+		int result = imposeChanges;
+		imposeChanges = 0;
+
+		if (log.isDebugEnabled()) {
+			log.debug(String.format("sceImposeChanges returning 0x%X", result));
+		}
+
+		return result;
+	}
+
+	@HLEFunction(nid = 0x0F067E16, version = 660)
+	public int sceImposeChanges_660() {
+		// Has no parameters
+		return sceImposeChanges();
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x9BA61B49, version = 150)
+	public int sceImpose_9BA61B49() {
+		// Possible return values: 0 or 1
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x9DBCE0C4, version = 150)
+	public int sceImpose_9DBCE0C4(int unknown) {
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xBCF1D254, version = 660)
+	public int sceImpose_BCF1D254_660(int unknown) {
+		return sceImpose_9DBCE0C4(unknown);
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xBB3F5DEC, version = 150)
+	public int sceImpose_BB3F5DEC(int unknown1, int unknown2, int unknown3) {
 		return 0;
 	}
 }

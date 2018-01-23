@@ -17,6 +17,7 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
 package jpcsp.HLE.modules;
 
 import static jpcsp.Allegrex.Common._s0;
+import static jpcsp.HLE.VFS.local.LocalVirtualFileSystem.getMsFileName;
 import static jpcsp.HLE.kernel.types.SceKernelErrors.ERROR_ERRNO_DEVICE_NOT_FOUND;
 import static jpcsp.HLE.kernel.types.SceKernelErrors.ERROR_ERRNO_FILE_ALREADY_EXISTS;
 import static jpcsp.HLE.kernel.types.SceKernelErrors.ERROR_ERRNO_FILE_NOT_FOUND;
@@ -37,10 +38,15 @@ import static jpcsp.HLE.kernel.types.SceKernelThreadInfo.PSP_THREAD_READY;
 import static jpcsp.HLE.kernel.types.SceKernelThreadInfo.THREAD_CALLBACK_MEMORYSTICK_FAT;
 import static jpcsp.util.Utilities.readStringNZ;
 import static jpcsp.util.Utilities.readStringZ;
+
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLELogging;
 import jpcsp.HLE.HLEModule;
+import jpcsp.HLE.HLEUnimplemented;
 import jpcsp.HLE.PspString;
 import jpcsp.HLE.TPointer;
 import jpcsp.HLE.TPointer32;
@@ -69,8 +75,10 @@ import jpcsp.HLE.VFS.SeekableDataInputVirtualFile;
 import jpcsp.HLE.VFS.VirtualFileSystemManager;
 import jpcsp.HLE.VFS.crypto.PGDVirtualFile;
 import jpcsp.HLE.VFS.emulator.EmulatorVirtualFileSystem;
+import jpcsp.HLE.VFS.iso.UmdIsoVirtualFile;
 import jpcsp.HLE.VFS.iso.UmdIsoVirtualFileSystem;
 import jpcsp.HLE.VFS.local.LocalVirtualFileSystem;
+import jpcsp.HLE.VFS.memoryStick.MemoryStickStorageVirtualFileSystem;
 import jpcsp.HLE.VFS.memoryStick.MemoryStickVirtualFileSystem;
 import jpcsp.HLE.kernel.Managers;
 import jpcsp.HLE.kernel.managers.MsgPipeManager;
@@ -92,6 +100,7 @@ import jpcsp.hardware.MemoryStick;
 import jpcsp.memory.IMemoryWriter;
 import jpcsp.memory.MemoryWriter;
 import jpcsp.settings.AbstractBoolSettingsListener;
+import jpcsp.settings.Settings;
 import jpcsp.util.Utilities;
 
 import org.apache.log4j.Logger;
@@ -162,26 +171,20 @@ public class IoFileMgrForUser extends HLEModule {
     protected VirtualFileSystemManager vfsManager;
     protected Map<String, String> assignedDevices;
 
-    public static enum IoOperation {
-        open(5), close(1), seek(1), ioctl(20), remove, rename, mkdir, dread, iodevctl(2),
-        // Duration of read operation: approx. 4 ms per 0x10000 bytes (tested on real PSP)
-        read(4, 0x10000),
-        // Duration of write operation: approx. 5 ms per 0x10000 bytes
-        write(5, 0x10000);
-
+    public static class IoOperationTiming {
         private int delayMillis;
         private int sizeUnit;
 
-        IoOperation() {
+        public IoOperationTiming() {
             this.delayMillis = 0;
         }
 
-        IoOperation(int delayMillis) {
+        public IoOperationTiming(int delayMillis) {
             this.delayMillis = delayMillis;
             this.sizeUnit = 0;
         }
 
-        IoOperation(int delayMillis, int sizeUnit) {
+        public IoOperationTiming(int delayMillis, int sizeUnit) {
             this.delayMillis = delayMillis;
             this.sizeUnit = sizeUnit;
         }
@@ -218,7 +221,14 @@ public class IoFileMgrForUser extends HLEModule {
         }
     }
 
-    // modeStrings indexed by [0, PSP_O_RDONLY, PSP_O_WRONLY, PSP_O_RDWR]
+    public static enum IoOperation {
+        open, close, seek, ioctl, remove, rename, mkdir, dread, iodevctl, read, write
+    }
+
+	public static final Map<IoOperation, IoOperationTiming> defaultTimings = new HashMap<IoFileMgrForUser.IoOperation, IoFileMgrForUser.IoOperationTiming>();
+	public static final Map<IoOperation, IoOperationTiming> noDelayTimings = new HashMap<IoFileMgrForUser.IoOperation, IoFileMgrForUser.IoOperationTiming>();
+
+	// modeStrings indexed by [0, PSP_O_RDONLY, PSP_O_WRONLY, PSP_O_RDWR]
     // SeekableRandomFile doesn't support write only: take "rw",
     private final static String[] modeStrings = {"r", "r", "rw", "rw"};
     public HashMap<Integer, IoInfo> fileIds;
@@ -391,6 +401,7 @@ public class IoFileMgrForUser extends HLEModule {
         int printableposition;
         final int id;
         final IVirtualFileSystem vfs;
+        String fileNameFilter;
 
         public IoDirInfo(String path, String[] filenames) {
         	vfs = null;
@@ -612,10 +623,14 @@ public class IoFileMgrForUser extends HLEModule {
 	        	vfsManager.register("disc0", vfsIso);
 	        	vfsManager.register("umd0", vfsIso);
 	        	vfsManager.register("umd1", vfsIso);
+	        	vfsManager.register("umd", vfsIso);
+	        	vfsManager.register("isofs", vfsIso);
     		} else {
     			vfsManager.unregister("disc0");
     			vfsManager.unregister("umd0");
     			vfsManager.unregister("umd1");
+    			vfsManager.unregister("umd");
+    			vfsManager.unregister("isofs");
 
     			// Register the local path if the application has been loaded as a file (and not as an UMD).
     			if (filepath != null) {
@@ -628,6 +643,20 @@ public class IoFileMgrForUser extends HLEModule {
     			}
     		}
     	}
+    }
+
+    private void registerVfsMs0() {
+    	if (vfsManager == null) {
+            vfsManager = new VirtualFileSystemManager();
+    	}
+        vfsManager.register("ms0", new LocalVirtualFileSystem(Settings.getInstance().getDirectoryMapping("ms0"), true));
+        vfsManager.register("fatms0", new LocalVirtualFileSystem(Settings.getInstance().getDirectoryMapping("ms0"), true));
+        vfsManager.register("flash0", new LocalVirtualFileSystem(Settings.getInstance().getDirectoryMapping("flash0"), false));
+        vfsManager.register("flash1", new LocalVirtualFileSystem(Settings.getInstance().getDirectoryMapping("flash1"), false));
+        vfsManager.register("exdata0", new LocalVirtualFileSystem(Settings.getInstance().getDirectoryMapping("exdata0"), false));
+        vfsManager.register("mscmhc0", new MemoryStickVirtualFileSystem());
+        vfsManager.register("msstor0p1", new MemoryStickStorageVirtualFileSystem());
+        vfsManager.register("msstor0", new MemoryStickStorageVirtualFileSystem());
     }
 
     @Override
@@ -661,11 +690,7 @@ public class IoFileMgrForUser extends HLEModule {
         vfsManager.register("emulator", new EmulatorVirtualFileSystem());
         vfsManager.register("kemulator", new EmulatorVirtualFileSystem());
         if (useVirtualFileSystem) {
-	        vfsManager.register("ms0", new LocalVirtualFileSystem("ms0/", true));
-	        vfsManager.register("fatms0", new LocalVirtualFileSystem("ms0/", true));
-	        vfsManager.register("flash0", new LocalVirtualFileSystem("flash0/", false));
-	        vfsManager.register("exdata0", new LocalVirtualFileSystem("exdata0/", false));
-	        vfsManager.register("mscmhc0", new MemoryStickVirtualFileSystem());
+        	registerVfsMs0();
 	        registerUmdIso();
         }
 
@@ -673,7 +698,33 @@ public class IoFileMgrForUser extends HLEModule {
 
         setSettingsListener("emu.extractPGD", new ExtractPGDSettingsListerner());
 
-        super.start();
+		defaultTimings.put(IoOperation.open, new IoFileMgrForUser.IoOperationTiming(5));
+		defaultTimings.put(IoOperation.close, new IoFileMgrForUser.IoOperationTiming(1));
+		defaultTimings.put(IoOperation.seek, new IoFileMgrForUser.IoOperationTiming(1));
+		defaultTimings.put(IoOperation.ioctl, new IoFileMgrForUser.IoOperationTiming(20));
+		defaultTimings.put(IoOperation.remove, new IoFileMgrForUser.IoOperationTiming());
+		defaultTimings.put(IoOperation.rename, new IoFileMgrForUser.IoOperationTiming());
+		defaultTimings.put(IoOperation.mkdir, new IoFileMgrForUser.IoOperationTiming());
+		defaultTimings.put(IoOperation.dread, new IoFileMgrForUser.IoOperationTiming());
+		defaultTimings.put(IoOperation.iodevctl, new IoFileMgrForUser.IoOperationTiming(2));
+		// Duration of read operation: approx. 7 ms per 0x10000 bytes (tested on real PSP)
+		defaultTimings.put(IoOperation.read, new IoFileMgrForUser.IoOperationTiming(7, 0x10000));
+		// Duration of write operation: approx. 5 ms per 0x10000 bytes
+		defaultTimings.put(IoOperation.write, new IoFileMgrForUser.IoOperationTiming(5, 0x10000));
+
+		noDelayTimings.put(IoOperation.open, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.close, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.seek, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.ioctl, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.remove, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.rename, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.mkdir, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.dread, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.iodevctl, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.read, new IoFileMgrForUser.IoOperationTiming());
+		noDelayTimings.put(IoOperation.write, new IoFileMgrForUser.IoOperationTiming());
+
+		super.start();
     }
 
     public void setHost0Path(String path) {
@@ -745,7 +796,7 @@ public class IoFileMgrForUser extends HLEModule {
     	}
     	absoluteFileName += fileName;
     	absoluteFileName = absoluteFileName.replaceFirst("^disc0/", "disc0:");
-    	absoluteFileName = absoluteFileName.replaceFirst("^ms0/", "ms0:");
+    	absoluteFileName = absoluteFileName.replaceFirst("^" + Settings.getInstance().getDirectoryMapping("ms0"), "ms0:");
 
     	return absoluteFileName;
     }
@@ -761,16 +812,16 @@ public class IoFileMgrForUser extends HLEModule {
 
         if (pspfilename.startsWith("flash0:")) {
         	if (pspfilename.startsWith("flash0:/")) {
-        		return pspfilename.replace("flash0:", "flash0");
+        		return pspfilename.replace("flash0:/", Settings.getInstance().getDirectoryMapping("flash0"));
         	}
-        	return pspfilename.replace("flash0:", "flash0/");
+        	return pspfilename.replace("flash0:", Settings.getInstance().getDirectoryMapping("flash0"));
         }
 
         if (pspfilename.startsWith("exdata0:")) {
         	if (pspfilename.startsWith("exdata0:/")) {
-        		return pspfilename.replace("exdata0:", "exdata0");
+        		return pspfilename.replace("exdata0:/", Settings.getInstance().getDirectoryMapping("exdata0"));
         	}
-        	return pspfilename.replace("exdata0:", "exdata0/");
+        	return pspfilename.replace("exdata0:", Settings.getInstance().getDirectoryMapping("exdata0"));
         }
 
         if (host0Path != null && pspfilename.startsWith("host0:") && !pspfilename.startsWith("host0:/")) {
@@ -846,7 +897,10 @@ public class IoFileMgrForUser extends HLEModule {
         // convert device to lower case here for case sensitive file systems (linux) and also for isUmdPath and trimUmdPrefix regex
         // - GTA: LCS uses upper case device DISC0
         // - The Fast and the Furious uses upper case device DISC0
-        filename = device.toLowerCase();
+        filename = Settings.getInstance().getDirectoryMapping(device.toLowerCase());
+        if (filename == null) {
+        	filename = device.toLowerCase();
+        }
         if (cwd.length() > 0) {
             filename += "/" + cwd;
         }
@@ -856,13 +910,15 @@ public class IoFileMgrForUser extends HLEModule {
         return filename;
     }
 
-    private final String[] umdPrefixes = new String[] {
-        "disc", "umd"
+    private static final String[] umdPrefixes = new String[] {
+        "disc[0-9]+", "umd[0-9]+", "umd", "isofs"
     };
 
     private boolean isUmdPath(String deviceFilePath) {
-        for (int i = 0; i < umdPrefixes.length; i++) {
-            if (deviceFilePath.matches("^" + umdPrefixes[i] + "[0-9]+.*")) {
+        for (String umdPrefix : umdPrefixes) {
+            if (deviceFilePath.matches(umdPrefix)) {
+                return true;
+            } else if (deviceFilePath.matches(umdPrefix + "/.*")) {
                 return true;
             }
         }
@@ -872,15 +928,15 @@ public class IoFileMgrForUser extends HLEModule {
 
     private String trimUmdPrefix(String pcfilename) {
         // Assume the device name is always lower case (ensured by getDeviceFilePath)
-        // Assume there is always a device number
         // Handle case where file path is blank so there is no slash after the device name
-        for (int i = 0; i < umdPrefixes.length; i++) {
-            if (pcfilename.matches("^" + umdPrefixes[i] + "[0-9]+/.*")) {
+        for (String umdPrefix : umdPrefixes) {
+        	if (pcfilename.matches(umdPrefix)) {
+        		return "";
+        	} else if (pcfilename.matches(umdPrefix + "/.*")) {
                 return pcfilename.substring(pcfilename.indexOf("/") + 1);
-            } else if (pcfilename.matches("^" + umdPrefixes[i] + "[0-9]+")) {
-                return "";
             }
         }
+
         return pcfilename;
     }
 
@@ -1064,6 +1120,17 @@ public class IoFileMgrForUser extends HLEModule {
         return stat;
     }
 
+    public IVirtualFile getVirtualFile(String filename, int flags, int permissions) {
+    	String absoluteFileName = getAbsoluteFileName(filename);
+    	StringBuilder localFileName = new StringBuilder();
+    	IVirtualFileSystem vfs = vfsManager.getVirtualFileSystem(absoluteFileName, localFileName);
+    	if (vfs != null) {
+    		return vfs.ioOpen(localFileName.toString(), flags, permissions);
+    	}
+
+    	return null;
+    }
+
     public SeekableDataInput getFile(String filename, int flags) {
         SeekableDataInput resultFile = null;
         String pcfilename = getDeviceFilePath(filename);
@@ -1142,17 +1209,17 @@ public class IoFileMgrForUser extends HLEModule {
         return modeStrings[flags & PSP_O_RDWR];
     }
 
-    private long updateResult(IoInfo info, long result, boolean async, boolean resultIs64bit, IoOperation ioOperation) {
-    	return updateResult(info, result, async, resultIs64bit, ioOperation, null, 0);
+    private long updateResult(IoInfo info, long result, boolean async, boolean resultIs64bit, IoOperationTiming ioOperationTiming) {
+    	return updateResult(info, result, async, resultIs64bit, ioOperationTiming, null, 0);
     }
 
     // Handle returning/storing result for sync/async operations
-    private long updateResult(IoInfo info, long result, boolean async, boolean resultIs64bit, IoOperation ioOperation, IAction asyncAction, int size) {
+    private long updateResult(IoInfo info, long result, boolean async, boolean resultIs64bit, IoOperationTiming ioOperationTiming, IAction asyncAction, int size) {
     	// No async IO is started when returning error code ERROR_KERNEL_ASYNC_BUSY
     	if (info != null && result != ERROR_KERNEL_ASYNC_BUSY) {
             if (async) {
                 if (!info.asyncPending) {
-                    result = startIoAsync(info, result, ioOperation, asyncAction, size);
+                    result = startIoAsync(info, result, ioOperationTiming, asyncAction, size);
                 }
             } else {
                 info.result = ERROR_KERNEL_NO_ASYNC_OP;
@@ -1210,10 +1277,18 @@ public class IoFileMgrForUser extends HLEModule {
         return iso;
     }
 
-    protected void delayIoOperation(IoOperation ioOperation) {
-        if (!noDelayIoOperation && ioOperation.delayMillis > 0) {
-            Modules.ThreadManForUserModule.hleKernelDelayThread(ioOperation.delayMillis * 1000, false);
+    private void delayIoOpertation(int delayMillis) {
+        if (!noDelayIoOperation && delayMillis > 0) {
+            Modules.ThreadManForUserModule.hleKernelDelayThread(delayMillis * 1000, false);
         }
+    }
+
+    protected void delayIoOperation(IoOperationTiming ioOperationTiming) {
+    	delayIoOpertation(ioOperationTiming.getDelayMillis());
+    }
+
+    protected void delayIoOperation(IoOperationTiming ioOperationTiming, int size) {
+    	delayIoOpertation(ioOperationTiming.getDelayMillis(size));
     }
 
     public void hleSetNoDelayIoOperation(boolean noDelayIoOperation) {
@@ -1278,7 +1353,7 @@ public class IoFileMgrForUser extends HLEModule {
      * @param info   the file
      * @param result the result the async IO should return
      */
-    private int startIoAsync(IoInfo info, long result, IoOperation ioOperation, IAction asyncAction, int size) {
+    private int startIoAsync(IoInfo info, long result, IoOperationTiming ioOperationTiming, IAction asyncAction, int size) {
         int startResult = 0;
         if (info == null) {
             return startResult;
@@ -1286,7 +1361,7 @@ public class IoFileMgrForUser extends HLEModule {
         info.asyncPending = true;
         info.asyncResultPending = false;
         long now = Emulator.getClock().currentTimeMillis();
-        info.asyncDoneMillis = now + ioOperation.getDelayMillis(size);
+        info.asyncDoneMillis = now + ioOperationTiming.getDelayMillis(size);
         info.asyncAction = asyncAction;
         info.result = result;
         if (info.asyncThread == null) {
@@ -1306,9 +1381,10 @@ public class IoFileMgrForUser extends HLEModule {
             	stackSize = 0x800;
             }
 
+            // The stack of the async thread is always allocated in the kernel partition
             info.asyncThread = threadMan.hleKernelCreateThread("SceIofileAsync",
                     ThreadManForUser.ASYNC_LOOP_ADDRESS, asyncPriority, stackSize,
-                    threadMan.getCurrentThread().attr, 0, SysMemUserForUser.USER_PARTITION_ID);
+                    threadMan.getCurrentThread().attr, 0, SysMemUserForUser.KERNEL_PARTITION_ID);
 
             if (info.asyncThread.getStackAddr() == 0) {
         		log.warn(String.format("Cannot start the Async IO thread, not enough memory to create its stack"));
@@ -1465,14 +1541,12 @@ public class IoFileMgrForUser extends HLEModule {
 	        	vfsManager.register("disc0", vfsIso);
 	        	vfsManager.register("umd0", vfsIso);
 	        	vfsManager.register("umd1", vfsIso);
+	        	vfsManager.register("umd", vfsIso);
+	        	vfsManager.register("isofs", vfsIso);
 	        	umdRegistered = true;
 			}
 
-			vfsManager.register("ms0", new LocalVirtualFileSystem("ms0/", true));
-	        vfsManager.register("fatms0", new LocalVirtualFileSystem("ms0/", true));
-	        vfsManager.register("flash0", new LocalVirtualFileSystem("flash0/", false));
-	        vfsManager.register("exdata0", new LocalVirtualFileSystem("exdata0/", false));
-	        vfsManager.register("mscmhc0", new MemoryStickVirtualFileSystem());
+			registerVfsMs0();
 	        msRegistered = true;
     	}
 
@@ -1483,13 +1557,18 @@ public class IoFileMgrForUser extends HLEModule {
 			vfsManager.unregister("disc0");
 			vfsManager.unregister("umd0");
 			vfsManager.unregister("umd1");
+			vfsManager.unregister("umd");
+			vfsManager.unregister("isofs");
         }
         if (msRegistered) {
 			vfsManager.unregister("ms0");
 	        vfsManager.unregister("fatms0");
 	        vfsManager.unregister("flash0");
+	        vfsManager.unregister("flash1");
 	        vfsManager.unregister("exdata0");
 	        vfsManager.unregister("mscmhc0");
+	        vfsManager.unregister("msstor0");
+	        vfsManager.unregister("msstor0");
         }
 
         return vfs;
@@ -1514,7 +1593,7 @@ public class IoFileMgrForUser extends HLEModule {
         	} else {
         		log.warn(String.format("hleIoWaitAsync - unknown id 0x%X", id));
         	}
-            return ERROR_KERNEL_NO_ASYNC_OP;
+            return ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
         }
 
         if (info.result == ERROR_KERNEL_NO_ASYNC_OP || info.asyncThread == null) {
@@ -1546,6 +1625,8 @@ public class IoFileMgrForUser extends HLEModule {
         // The file was marked as closePending, so close it right away to avoid delays.
         if (info.closePending) {
             log.debug("hleIoWaitAsync - file marked with closePending, calling hleIoClose, not waiting");
+            info.asyncPending = false;
+            info.asyncResultPending = false;
             hleIoClose(info.id, false);
             waitForAsync = false;
         }
@@ -1596,7 +1677,9 @@ public class IoFileMgrForUser extends HLEModule {
     }
 
     public int hleIoOpen(int filename_addr, String filename, int flags, int permissions, boolean async) {
-        if (log.isInfoEnabled()) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
+
+    	if (log.isInfoEnabled()) {
             log.info("hleIoOpen filename = " + filename + " flags = " + Integer.toHexString(flags) + " permissions = 0" + Integer.toOctalString(permissions));
         }
         if (log.isDebugEnabled()) {
@@ -1665,6 +1748,7 @@ public class IoFileMgrForUser extends HLEModule {
         	StringBuilder localFileName = new StringBuilder();
         	IVirtualFileSystem vfs = vfsManager.getVirtualFileSystem(absoluteFileName, localFileName);
         	if (vfs != null) {
+        		timings = vfs.getTimings();
         		IVirtualFile vFile = vfs.ioOpen(localFileName.toString(), flags, permissions);
         		if (vFile == null) {
         			result = ERROR_ERRNO_FILE_NOT_FOUND;
@@ -1806,44 +1890,61 @@ public class IoFileMgrForUser extends HLEModule {
                 result = info.id;
             }
 
-            int startResult = startIoAsync(info, realResult, IoOperation.open, null, 0);
+            int startResult = startIoAsync(info, realResult, timings.get(IoOperation.open), null, 0);
             if (startResult < 0) {
             	result = startResult;
             }
+        } else {
+        	delayIoOperation(timings.get(IoOperation.open));
         }
 
         return result;
     }
 
     private int hleIoClose(int id, boolean async) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         int result;
 
-        if (log.isDebugEnabled()) {
-            log.debug("hleIoClose - id " + Integer.toHexString(id));
-        }
-
         IoInfo info = fileIds.get(id);
-        if (async) {
+        if (id == STDIN_ID || id == STDOUT_ID || id == STDERR_ID) {
+        	// Cannot close stdin, stdout, stderr
+        	result = SceKernelErrors.ERROR_KERNEL_ILLEGAL_PERMISSION;
+        	if (log.isDebugEnabled()) {
+        		log.debug(String.format("sceIoClose id=0x%X returning ERROR_KERNEL_ILLEGAL_PERMISSION(0x%08X)", id, result));
+        	}
+        } else if (async) {
             if (info != null) {
                 if (info.asyncPending || info.asyncResultPending) {
-                    log.warn("sceIoCloseAsync - id " + Integer.toHexString(id) + " PSP_ERROR_ASYNC_BUSY");
                     result = ERROR_KERNEL_ASYNC_BUSY;
+                	if (log.isDebugEnabled()) {
+                		log.debug(String.format("sceIoClose id=0x%X returning ERROR_KERNEL_ASYNC_BUSY(0x%08X)", id, result));
+                	}
                 } else {
                     info.closePending = true;
-                    result = (int) updateResult(info, 0, true, false, IoOperation.close);
+                    result = (int) updateResult(info, 0, true, false, timings.get(IoOperation.close));
                 }
             } else {
                 result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
+            	if (log.isDebugEnabled()) {
+            		log.debug(String.format("sceIoClose id=0x%X returning ERROR_KERNEL_BAD_FILE_DESCRIPTOR(0x%08X)", id, result));
+            	}
             }
         } else {
             try {
                 if (info == null) {
-                    if (id != 1 && id != 2) { // Ignore stdout and stderr.
-                        log.warn("sceIoClose - unknown id " + Integer.toHexString(id));
-                    }
                     result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
+                	if (log.isDebugEnabled()) {
+                		log.debug(String.format("sceIoClose id=0x%X returning ERROR_KERNEL_BAD_FILE_DESCRIPTOR(0x%08X)", id, result));
+                	}
+                } else if (info.asyncPending || info.asyncResultPending) {
+                	// Cannot close while an async operation is running
+                    result = ERROR_KERNEL_ASYNC_BUSY;
+                	if (log.isDebugEnabled()) {
+                		log.debug(String.format("sceIoClose id=0x%X returning ERROR_KERNEL_ASYNC_BUSY(0x%08X)", id, result));
+                	}
                 } else {
                 	if (info.vFile != null) {
+                		timings = info.vFile.getTimings();
                 		info.vFile.ioClose();
                 	} else if (info.readOnlyFile != null) {
                         // Can be just closing an empty handle, because hleIoOpen(async==true)
@@ -1857,7 +1958,6 @@ public class IoFileMgrForUser extends HLEModule {
                 }
             } catch (IOException e) {
                 log.error("pspiofilemgr - error closing file: " + e.getMessage());
-                e.printStackTrace();
                 result = -1;
             }
             for (IIoListener ioListener : ioListeners) {
@@ -1865,10 +1965,15 @@ public class IoFileMgrForUser extends HLEModule {
             }
         }
 
+        if (!async) {
+            delayIoOperation(timings.get(IoOperation.close));
+        }
+
         return result;
     }
 
     private int hleIoWrite(int id, TPointer dataAddr, int size, boolean async) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         IoInfo info = null;
         int result;
 
@@ -1906,6 +2011,7 @@ public class IoFileMgrForUser extends HLEModule {
                 } else if ((info.flags & PSP_O_RDWR) == PSP_O_RDONLY) {
                 	result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
                 } else if (info.vFile != null) {
+            		timings = info.vFile.getTimings();
                     if ((info.flags & PSP_O_APPEND) == PSP_O_APPEND) {
                         info.vFile.ioLseek(info.vFile.length());
                         info.position = info.vFile.length();
@@ -1966,15 +2072,23 @@ public class IoFileMgrForUser extends HLEModule {
                 result = -1;
             }
         }
-        result = (int) updateResult(info, result, async, false, IoOperation.write, null, size);
+        result = (int) updateResult(info, result, async, false, timings.get(IoOperation.write), null, size);
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoWrite(result, id, dataAddr.getAddress(), size, size);
+        }
+
+        if (!async) {
+            // Do not delay output on stdout/stderr
+            if (id != STDOUT_ID && id != STDERR_ID) {
+            	delayIoOperation(timings.get(IoOperation.write), size);
+            }
         }
 
         return result;
     }
 
     public int hleIoRead(int id, int data_addr, int size, boolean async) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         IoInfo info = null;
         int result;
         long position = 0;
@@ -2001,6 +2115,7 @@ public class IoFileMgrForUser extends HLEModule {
                 } else if ((info.flags & PSP_O_RDWR) == PSP_O_WRONLY) {
                 	result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
                 } else if (info.vFile != null) {
+            		timings = info.vFile.getTimings();
                     if (info.sectorBlockMode) {
                         // In sectorBlockMode, the size is a number of sectors
                         size *= UmdIsoFile.sectorLength;
@@ -2090,18 +2205,25 @@ public class IoFileMgrForUser extends HLEModule {
                 result = ERROR_KERNEL_FILE_READ_ERROR;
             }
         }
-        result = (int) updateResult(info, result, async, false, IoOperation.read, asyncAction, size);
+        result = (int) updateResult(info, result, async, false, timings.get(IoOperation.read), asyncAction, size);
         // Call the IO listeners (performed in the async action if one is provided, otherwise call them here)
         if (asyncAction == null) {
             for (IIoListener ioListener : ioListeners) {
                 ioListener.sceIoRead(result, id, data_addr, requestedSize, size, position, dataInput, vFile);
             }
         }
-        
+
+        if (!async) {
+            if (size > 0x100) {
+            	delayIoOperation(timings.get(IoOperation.read), size);
+            }
+        }
+
         return result;
     }
 
     private long hleIoLseek(int id, long offset, int whence, boolean resultIs64bit, boolean async) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         IoInfo info = null;
         long result;
 
@@ -2118,6 +2240,7 @@ public class IoFileMgrForUser extends HLEModule {
                     log.warn("seek - id " + Integer.toHexString(id) + " PSP_ERROR_ASYNC_BUSY");
                     result = ERROR_KERNEL_ASYNC_BUSY;
                 } else if (info.vFile != null) {
+            		timings = info.vFile.getTimings();
                     if (info.sectorBlockMode) {
                         // In sectorBlockMode, the offset is a sector number
                         offset *= UmdIsoFile.sectorLength;
@@ -2228,7 +2351,7 @@ public class IoFileMgrForUser extends HLEModule {
                 result = -1;
             }
         }
-        result = updateResult(info, result, async, resultIs64bit, IoOperation.seek);
+        result = updateResult(info, result, async, resultIs64bit, timings.get(IoOperation.seek));
 
         if (resultIs64bit) {
             for (IIoListener ioListener : ioListeners) {
@@ -2244,10 +2367,15 @@ public class IoFileMgrForUser extends HLEModule {
         	log.debug(String.format("hleIoLseek returning 0x%X", result));
         }
 
+        if (!async) {
+            delayIoOperation(timings.get(IoOperation.seek));
+        }
+
         return result;
     }
 
     public int hleIoIoctl(int id, int cmd, int indata_addr, int inlen, int outdata_addr, int outlen, boolean async) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         IoInfo info = null;
         int result;
         Memory mem = Memory.getInstance();
@@ -2269,13 +2397,48 @@ public class IoFileMgrForUser extends HLEModule {
 
         info = fileIds.get(id);
         if (info == null) {
-            log.warn("hleIoIoctl - unknown id " + Integer.toHexString(id));
-            result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
+        	IoDirInfo dirInfo = dirIds.get(id);
+        	if (dirInfo != null) {
+        		switch (cmd) {
+        			// Set sceIoDread file name filter
+        			case 0x02415050:
+        				if (inlen == 4) {
+        					int fileNameFilterAddr = mem.read32(indata_addr);
+        					dirInfo.fileNameFilter = Utilities.readStringZ(mem, fileNameFilterAddr);
+        					if (log.isDebugEnabled()) {
+        						log.debug(String.format("hleIoIoctl settings sceIoDread file name filter '%s'", dirInfo.fileNameFilter));
+        					}
+        	        		result = 0;
+        				} else {
+                            log.warn(String.format("hleIoIoctl cmd=0x%08X 0x%08X %d unsupported parameters", cmd, indata_addr, inlen));
+                            result = ERROR_INVALID_ARGUMENT;
+        				}
+        				break;
+    				default:
+                    	result = -1;
+                        log.warn(String.format("hleIoIoctl 0x%08X unknown command on IoDirInfo, inlen=%d, outlen=%d", cmd, inlen, outlen));
+                        if (Memory.isAddressGood(indata_addr)) {
+                            for (int i = 0; i < inlen; i += 4) {
+                                log.warn(String.format("hleIoIoctl indata[%d]=0x%08X", i / 4, mem.read32(indata_addr + i)));
+                            }
+                        }
+                        if (Memory.isAddressGood(outdata_addr)) {
+                            for (int i = 0; i < Math.min(outlen, 256); i += 4) {
+                                log.warn(String.format("hleIoIoctl outdata[%d]=0x%08X", i / 4, mem.read32(outdata_addr + i)));
+                            }
+                        }
+                        break;
+        		}
+        	} else {
+        		log.warn(String.format("hleIoIoctl - unknown id 0x%X", id));
+        		result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
+        	}
         } else if (info.asyncPending || info.asyncResultPending) {
             // Can't execute another operation until the previous one completed
-            log.warn("hleIoIoctl - id " + Integer.toHexString(id) + " PSP_ERROR_ASYNC_BUSY");
+            log.warn(String.format("hleIoIoctl - id 0x%X PSP_ERROR_ASYNC_BUSY", id));
             result = ERROR_KERNEL_ASYNC_BUSY;
         } else if (info.vFile != null && cmd != 0x04100001) {
+    		timings = info.vFile.getTimings();
         	result = info.vFile.ioIoctl(cmd, new TPointer(mem, indata_addr), inlen, new TPointer(mem, outdata_addr), outlen);
         } else {
             switch (cmd) {
@@ -2300,6 +2463,20 @@ public class IoFileMgrForUser extends HLEModule {
                         }
                     } else {
                         log.warn("hleIoIoctl cmd=0x01010005 " + String.format("0x%08X %d", indata_addr, inlen) + " unsupported parameters");
+                        result = ERROR_INVALID_ARGUMENT;
+                    }
+                    break;
+                }
+                // UMD file ahead (from info listed in the log file of "The Legend of Heroes: Trails in the Sky SC")
+                case 0x0101000A: {
+                    if (Memory.isAddressGood(indata_addr) && inlen >= 4) {
+                    	int length = mem.read32(indata_addr);
+                    	if (log.isInfoEnabled()) {
+                    		log.info(String.format("hleIoIoctl cmd=0x%08X length=0x%X", cmd, length));
+                    	}
+                    	result = 0;
+                    } else {
+                        log.warn(String.format("hleIoIoctl cmd=0x%08X 0x%08X %d unsupported parameters", cmd, indata_addr, inlen));
                         result = ERROR_INVALID_ARGUMENT;
                     }
                     break;
@@ -2572,7 +2749,11 @@ public class IoFileMgrForUser extends HLEModule {
                             log.debug(String.format("hleIoIoctl get AES key %s", keyHex.toString()));
                         }
 
-                    	PGDVirtualFile pgdFile = new PGDVirtualFile(keyBuf, new SeekableDataInputVirtualFile(info.readOnlyFile));
+                        IVirtualFile ioctlFile = null;
+                        if (info.readOnlyFile instanceof UmdIsoFile) {
+                        	ioctlFile = new UmdIsoVirtualFile((UmdIsoFile) info.readOnlyFile);
+                        }
+                    	PGDVirtualFile pgdFile = new PGDVirtualFile(keyBuf, new SeekableDataInputVirtualFile(info.readOnlyFile, ioctlFile));
                     	if (!pgdFile.isHeaderPresent()) {
                             // No "PGD" found in the header, leave the file unchanged
                     		result = 0;
@@ -2588,7 +2769,37 @@ public class IoFileMgrForUser extends HLEModule {
                     }
                     break;
                 }
-
+                // Check if LoadExec is allowed on the file
+                case 0x00208013: {
+                	if (log.isDebugEnabled()) {
+                		log.debug(String.format("Checking if LoadExec is allowed on '%s'", info));
+                	}
+                	// Result == 0: LoadExec allowed
+                	// Result != 0: LoadExec prohibited
+                	result = 0;
+                	break;
+                }
+                // Check if LoadModule is allowed on the file
+                case 0x00208003: {
+                	if (log.isDebugEnabled()) {
+                		log.debug(String.format("Checking if LoadModule is allowed on '%s'", info));
+                	}
+                	// Result == 0: LoadModule allowed
+                	// Result != 0: LoadModule prohibited
+                	result = 0;
+                	break;
+                }
+                // Check if PRX type is allowed on the file
+                case 0x00208081:
+                case 0x00208082: {
+                	if (log.isDebugEnabled()) {
+                		log.debug(String.format("Checking if PRX type is allowed on '%s'", info));
+                	}
+                	// Result == 0: PRX type allowed
+                	// Result != 0: PRX type prohibited
+                	result = 0;
+                	break;
+                }
                 default: {
                 	result = -1;
                     log.warn(String.format("hleIoIoctl 0x%08X unknown command, inlen=%d, outlen=%d", cmd, inlen, outlen));
@@ -2607,13 +2818,13 @@ public class IoFileMgrForUser extends HLEModule {
             }
         }
 
-        result = (int) updateResult(info, result, async, false, IoOperation.ioctl);
+        result = (int) updateResult(info, result, async, false, timings.get(IoOperation.ioctl));
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoIoctl(result, id, cmd, indata_addr, inlen, outdata_addr, outlen);
         }
 
         if (needDelayIoOperation && !async) {
-        	delayIoOperation(IoOperation.ioctl);
+        	delayIoOperation(timings.get(IoOperation.ioctl));
         }
 
         return result;
@@ -2644,6 +2855,110 @@ public class IoFileMgrForUser extends HLEModule {
     	}
     }
 
+    private int hleIoRename(int oldFileNameAddr, String oldFileName, int newFileNameAddr, String newFileName) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
+
+    	// The new file name can omit the file directory, in which case the directory
+    	// of the old file name is used.
+    	// I.e., when renaming "ms0:/PSP/SAVEDATA/xxxx" into "yyyy",
+    	// actually rename into "ms0:/PSP/SAVEDATA/yyyy".
+    	if (!newFileName.contains("/")) {
+    		int prefixOffset = oldFileName.lastIndexOf("/");
+    		if (prefixOffset >= 0) {
+    			newFileName = oldFileName.substring(0, prefixOffset + 1) + newFileName;
+    		}
+    	}
+
+    	String oldpcfilename = getDeviceFilePath(oldFileName);
+        String newpcfilename = getDeviceFilePath(newFileName);
+        int result;
+
+        String absoluteOldFileName = getAbsoluteFileName(oldFileName);
+        StringBuilder localOldFileName = new StringBuilder();
+        IVirtualFileSystem oldVfs = vfsManager.getVirtualFileSystem(absoluteOldFileName, localOldFileName);
+        if (oldVfs != null) {
+            String absoluteNewFileName = getAbsoluteFileName(newFileName);
+            StringBuilder localNewFileName = new StringBuilder();
+            IVirtualFileSystem newVfs = vfsManager.getVirtualFileSystem(absoluteNewFileName, localNewFileName);
+            if (oldVfs != newVfs) {
+                log.error(String.format("sceIoRename - renaming across devices not allowed '%s' - '%s'", oldFileName, newFileName));
+                result = ERROR_ERRNO_DEVICE_NOT_FOUND;
+            } else {
+        		timings = oldVfs.getTimings();
+            	result = oldVfs.ioRename(localOldFileName.toString(), localNewFileName.toString());
+            }
+    	} else if (useVirtualFileSystem) {
+            log.error(String.format("sceIoRename - device not found '%s'", oldFileName));
+            result = ERROR_ERRNO_DEVICE_NOT_FOUND;
+        } else if (oldpcfilename != null) {
+            if (isUmdPath(oldpcfilename)) {
+                result = -1;
+            } else {
+                File file = new File(oldpcfilename);
+                File newfile = new File(newpcfilename);
+                if (log.isDebugEnabled()) {
+                	log.debug(String.format("sceIoRename: renaming file '%s' to '%s'", oldpcfilename, newpcfilename));
+                }
+                if (file.renameTo(newfile)) {
+                	result = 0;
+                } else {
+                	log.warn(String.format("sceIoRename failed: %s(%s) to %s(%s)", oldFileName, oldpcfilename, newFileName, newpcfilename));
+                	if (file.exists()) {
+                		result = -1;
+                	} else {
+                		result = ERROR_ERRNO_FILE_NOT_FOUND;
+                	}
+                }
+            }
+        } else {
+        	result = -1;
+        }
+
+        for (IIoListener ioListener : ioListeners) {
+            ioListener.sceIoRename(result, oldFileNameAddr, oldFileName, newFileNameAddr, newFileName);
+        }
+
+        delayIoOperation(timings.get(IoOperation.rename));
+
+        return result;
+    }
+
+    public int hleIoGetstat(int filenameAddr, String filename, TPointer statAddr) {
+        int result;
+        SceIoStat stat = null;
+
+        String absoluteFileName = getAbsoluteFileName(filename);
+    	StringBuilder localFileName = new StringBuilder();
+    	IVirtualFileSystem vfs = vfsManager.getVirtualFileSystem(absoluteFileName, localFileName);
+    	if (vfs != null) {
+    		stat = new SceIoStat();
+    		result = vfs.ioGetstat(localFileName.toString(), stat);
+    	} else if (useVirtualFileSystem) {
+            log.error(String.format("sceIoGetstat - device not found '%s'", filename));
+            result = ERROR_ERRNO_DEVICE_NOT_FOUND;
+    	} else {
+    		String pcfilename = getDeviceFilePath(filename);
+    		stat = stat(pcfilename);
+    		result = (stat != null) ? 0 : ERROR_ERRNO_FILE_NOT_FOUND;
+    	}
+
+    	if (log.isDebugEnabled()) {
+    		log.debug(String.format("sceIoGetstat returning 0x%08X, %s", result, stat));
+    	}
+
+    	if (stat != null && result == 0) {
+            stat.write(statAddr);
+        }
+
+    	if (filenameAddr != 0) {
+	        for (IIoListener ioListener : ioListeners) {
+	            ioListener.sceIoGetStat(result, filenameAddr, filename, statAddr.getAddress());
+	        }
+    	}
+        
+        return result;
+    }
+
     /**
      * sceIoPollAsync
      * 
@@ -2666,7 +2981,7 @@ public class IoFileMgrForUser extends HLEModule {
      * @return
      */
     @HLEFunction(nid = 0xE23EEC33, version = 150, checkInsideInterrupt = true)
-    public int sceIoWaitAsync(int id, @CanBeNull TPointer64 resAddr) {
+    public int sceIoWaitAsync(int id, @CanBeNull @BufferInfo(usage=Usage.out) TPointer64 resAddr) {
         return hleIoWaitAsync(id, resAddr, true, false);
     }
 
@@ -2679,7 +2994,7 @@ public class IoFileMgrForUser extends HLEModule {
      * @return
      */
     @HLEFunction(nid = 0x35DBD746, version = 150, checkInsideInterrupt = true)
-    public int sceIoWaitAsyncCB(int id, @CanBeNull TPointer64 resAddr) {
+    public int sceIoWaitAsyncCB(int id, @CanBeNull @BufferInfo(usage=Usage.out) TPointer64 resAddr) {
         return hleIoWaitAsync(id, resAddr, true, true);
     }
 
@@ -2777,10 +3092,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x810C4BC3, version = 150, checkInsideInterrupt = true)
     public int sceIoClose(int id) {
-        int result = hleIoClose(id, false);
-        delayIoOperation(IoOperation.close);
-
-        return result;
+        return hleIoClose(id, false);
     }
 
     /**
@@ -2806,9 +3118,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x109F50BC, version = 150, checkInsideInterrupt = true)
     public int sceIoOpen(PspString filename, int flags, int permissions) {
-        int result = hleIoOpen(filename, flags, permissions, /* async = */ false);
-        delayIoOperation(IoOperation.open);
-        return result;
+        return hleIoOpen(filename, flags, permissions, /* async = */ false);
     }
 
     /**
@@ -2835,12 +3145,8 @@ public class IoFileMgrForUser extends HLEModule {
      * @return
      */
     @HLEFunction(nid = 0x6A638D83, version = 150, checkInsideInterrupt = true)
-    public int sceIoRead(int id, int data_addr, int size) {
-        int result = hleIoRead(id, data_addr, size, false);
-        if (size > 0x100) {
-        	delayIoOperation(IoOperation.read);
-        }
-        return result;
+    public int sceIoRead(int id, TPointer data_addr, int size) {
+        return hleIoRead(id, data_addr.getAddress(), size, false);
     }
 
     /**
@@ -2853,8 +3159,8 @@ public class IoFileMgrForUser extends HLEModule {
      * @return
      */
     @HLEFunction(nid = 0xA0B5A7C2, version = 150, checkInsideInterrupt = true)
-    public int sceIoReadAsync(int id, int data_addr, int size) {
-        return hleIoRead(id, data_addr, size, true);
+    public int sceIoReadAsync(int id, TPointer data_addr, int size) {
+        return hleIoRead(id, data_addr.getAddress(), size, true);
     }
 
     /**
@@ -2867,15 +3173,8 @@ public class IoFileMgrForUser extends HLEModule {
      * @return
      */
     @HLEFunction(nid = 0x42EC03AC, version = 150, checkInsideInterrupt = true)
-    public int sceIoWrite(int id, TPointer dataAddr, int size) {
-        int result = hleIoWrite(id, dataAddr, size, false);
-
-        // Do not delay output on stdout/stderr
-        if (id != STDOUT_ID && id != STDERR_ID) {
-        	delayIoOperation(IoOperation.write);
-        }
-
-        return result;
+    public int sceIoWrite(int id, @BufferInfo(lengthInfo=LengthInfo.nextParameter, usage=Usage.in) TPointer dataAddr, int size) {
+        return hleIoWrite(id, dataAddr, size, false);
     }
 
     /**
@@ -2903,9 +3202,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x27EB27B8, version = 150, checkInsideInterrupt = true)
     public long sceIoLseek(int id, long offset, int whence) {
-        long result = hleIoLseek(id, offset, whence, true, false);
-        delayIoOperation(IoOperation.seek);
-        return result;
+        return hleIoLseek(id, offset, whence, true, false);
     }
 
     /**
@@ -2933,9 +3230,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x68963324, version = 150, checkInsideInterrupt = true)
     public int sceIoLseek32(int id, int offset, int whence) {
-        int result = (int) hleIoLseek(id, (long) offset, whence, false, false);
-        delayIoOperation(IoOperation.seek);
-        return result;
+        return (int) hleIoLseek(id, (long) offset, whence, false, false);
     }
 
     /**
@@ -2993,12 +3288,15 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0xB29DDF9C, version = 150, checkInsideInterrupt = true)
     public int sceIoDopen(PspString dirname) {
-        String pcfilename = getDeviceFilePath(dirname.getString());
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         int result;
+
+        String pcfilename = getDeviceFilePath(dirname.getString());
         String absoluteFileName = getAbsoluteFileName(dirname.getString());
         StringBuilder localFileName = new StringBuilder();
         IVirtualFileSystem vfs = vfsManager.getVirtualFileSystem(absoluteFileName, localFileName);
         if (vfs != null) {
+        	timings = vfs.getTimings();
         	String[] fileNames = vfs.ioDopen(localFileName.toString());
         	if (fileNames == null) {
         		result = ERROR_ERRNO_FILE_NOT_FOUND;
@@ -3047,7 +3345,13 @@ public class IoFileMgrForUser extends HLEModule {
                 }
                 File f = new File(pcfilename);
                 if (f.isDirectory()) {
-                    IoDirInfo info = new IoDirInfo(pcfilename, f.list());
+                	String files[] = f.list();
+                	if (files != null) {
+	                	for (int i = 0; i < files.length; i++) {
+	                		files[i] = getMsFileName(files[i]);
+	                	}
+                	}
+                    IoDirInfo info = new IoDirInfo(pcfilename, files);
                     result = info.id;
                 } else {
                     log.warn("sceIoDopen '" + pcfilename + "' not a directory! (could be missing)");
@@ -3060,7 +3364,9 @@ public class IoFileMgrForUser extends HLEModule {
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoDopen(result, dirname.getAddress(), dirname.getString());
         }
-        delayIoOperation(IoOperation.open);
+
+        delayIoOperation(timings.get(IoOperation.open));
+
         return result;
     }
 
@@ -3074,6 +3380,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0xE3EB004C, version = 150, checkInsideInterrupt = true)
     public int sceIoDread(int id, TPointer direntAddr) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         IoDirInfo info = dirIds.get(id);
 
         int result;
@@ -3082,9 +3389,32 @@ public class IoFileMgrForUser extends HLEModule {
             result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
         } else if (info.hasNext()) {
             String filename = info.next();
+            if (info.fileNameFilter != null) {
+                // PSP file name pattern:
+                //   '?' matches one character
+                //   '*' matches any character sequence
+                // To convert to regular expressions:
+                //   replace '?' with '.'
+                //   replace '*' with '.*'
+                String pattern = info.fileNameFilter.replace('?', '.');
+                pattern = pattern.replace("*", ".*");
+                while (!filename.matches(pattern)) {
+                	if (!info.hasNext()) {
+                    	if (log.isDebugEnabled()) {
+                    		log.debug(String.format("sceIoDread id=0x%X no more files matching pattern '%s'", id, info.fileNameFilter));
+                    	}
+                		filename = null;
+                		break;
+                	}
+                	filename = info.next();
+                }
+            }
 
             SceIoDirent dirent = null;
-            if (info.vfs != null) {
+            if (filename == null) {
+            	result = 0;
+            } else if (info.vfs != null) {
+            	timings = info.vfs.getTimings();
             	SceIoStat stat = new SceIoStat();
             	dirent = new SceIoDirent(stat, filename);
             	result = info.vfs.ioDread(info.path, dirent);
@@ -3120,7 +3450,9 @@ public class IoFileMgrForUser extends HLEModule {
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoDread(result, id, direntAddr.getAddress());
         }
-        delayIoOperation(IoOperation.dread);
+
+        delayIoOperation(timings.get(IoOperation.dread));
+
         return result;
     }
 
@@ -3133,8 +3465,10 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0xEB092469, version = 150, checkInsideInterrupt = true)
     public int sceIoDclose(int id) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         IoDirInfo info = dirIds.get(id);
         int result;
+
         if (info == null) {
             log.warn("sceIoDclose - unknown id " + Integer.toHexString(id));
             result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
@@ -3149,7 +3483,9 @@ public class IoFileMgrForUser extends HLEModule {
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoDclose(result, id);
         }
-        delayIoOperation(IoOperation.close);
+
+        delayIoOperation(timings.get(IoOperation.close));
+
         return result;
     }
 
@@ -3162,6 +3498,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0xF27A9C51, version = 150, checkInsideInterrupt = true)
     public int sceIoRemove(PspString filename) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         String pcfilename = getDeviceFilePath(filename.getString());
         int result;
 
@@ -3195,7 +3532,8 @@ public class IoFileMgrForUser extends HLEModule {
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoRemove(result, filename.getAddress(), filename.getString());
         }
-        delayIoOperation(IoOperation.remove);
+
+        delayIoOperation(timings.get(IoOperation.remove));
 
         return result;
     }
@@ -3210,6 +3548,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x06A70004, version = 150, checkInsideInterrupt = true)
     public int sceIoMkdir(PspString dirname, int permissions) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         String pcfilename = getDeviceFilePath(dirname.getString());
         int result;
 
@@ -3232,7 +3571,8 @@ public class IoFileMgrForUser extends HLEModule {
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoMkdir(result, dirname.getAddress(), dirname.getString(), permissions);
         }
-        delayIoOperation(IoOperation.mkdir);
+
+        delayIoOperation(timings.get(IoOperation.mkdir));
 
         return result;
     }
@@ -3246,6 +3586,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x1117C65F, version = 150, checkInsideInterrupt = true)
     public int sceIoRmdir(PspString dirname) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         String pcfilename = getDeviceFilePath(dirname.getString());
         int result;
 
@@ -3259,8 +3600,11 @@ public class IoFileMgrForUser extends HLEModule {
             result = ERROR_ERRNO_DEVICE_NOT_FOUND;
         } else if (pcfilename != null) {
             File f = new File(pcfilename);
-            f.delete();
-            result = 0;
+            if (f.delete()) {
+            	result = 0;
+            } else {
+            	result = -1;
+            }
         } else {
         	result = -1;
         }
@@ -3268,7 +3612,8 @@ public class IoFileMgrForUser extends HLEModule {
         for (IIoListener ioListener : ioListeners) {
             ioListener.sceIoRmdir(result, dirname.getAddress(), dirname.getString());
         }
-        delayIoOperation(IoOperation.remove);
+
+        delayIoOperation(timings.get(IoOperation.remove));
 
         return result;
     }
@@ -3335,37 +3680,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0xACE946E8, version = 150, checkInsideInterrupt = true)
     public int sceIoGetstat(PspString filename, TPointer statAddr) {
-        int result;
-        SceIoStat stat = null;
-
-        String absoluteFileName = getAbsoluteFileName(filename.getString());
-    	StringBuilder localFileName = new StringBuilder();
-    	IVirtualFileSystem vfs = vfsManager.getVirtualFileSystem(absoluteFileName, localFileName);
-    	if (vfs != null) {
-    		stat = new SceIoStat();
-    		result = vfs.ioGetstat(localFileName.toString(), stat);
-    	} else if (useVirtualFileSystem) {
-            log.error(String.format("sceIoGetstat - device not found '%s'", filename));
-            result = ERROR_ERRNO_DEVICE_NOT_FOUND;
-    	} else {
-    		String pcfilename = getDeviceFilePath(filename.getString());
-    		stat = stat(pcfilename);
-    		result = (stat != null) ? 0 : ERROR_ERRNO_FILE_NOT_FOUND;
-    	}
-
-    	if (log.isDebugEnabled()) {
-    		log.debug(String.format("sceIoGetstat returning 0x%08X, %s", result, stat));
-    	}
-
-    	if (stat != null && result == 0) {
-            stat.write(statAddr);
-        }
-
-        for (IIoListener ioListener : ioListeners) {
-            ioListener.sceIoGetStat(result, filename.getAddress(), filename.getString(), statAddr.getAddress());
-        }
-        
-        return result;
+    	return hleIoGetstat(filename.getAddress(), filename.getString(), statAddr);
     }
 
     /**
@@ -3468,69 +3783,7 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x779103A0, version = 150, checkInsideInterrupt = true)
     public int sceIoRename(PspString pspOldFileName, PspString pspNewFileName) {
-    	String oldFileName = pspOldFileName.getString();
-    	String newFileName = pspNewFileName.getString();
-
-    	// The new file name can omit the file directory, in which case the directory
-    	// of the old file name is used.
-    	// I.e., when renaming "ms0:/PSP/SAVEDATA/xxxx" into "yyyy",
-    	// actually rename into "ms0:/PSP/SAVEDATA/yyyy".
-    	if (!newFileName.contains("/")) {
-    		int prefixOffset = oldFileName.lastIndexOf("/");
-    		if (prefixOffset >= 0) {
-    			newFileName = oldFileName.substring(0, prefixOffset + 1) + newFileName;
-    		}
-    	}
-
-    	String oldpcfilename = getDeviceFilePath(oldFileName);
-        String newpcfilename = getDeviceFilePath(newFileName);
-        int result;
-
-        String absoluteOldFileName = getAbsoluteFileName(oldFileName);
-        StringBuilder localOldFileName = new StringBuilder();
-        IVirtualFileSystem oldVfs = vfsManager.getVirtualFileSystem(absoluteOldFileName, localOldFileName);
-        if (oldVfs != null) {
-            String absoluteNewFileName = getAbsoluteFileName(newFileName);
-            StringBuilder localNewFileName = new StringBuilder();
-            IVirtualFileSystem newVfs = vfsManager.getVirtualFileSystem(absoluteNewFileName, localNewFileName);
-            if (oldVfs != newVfs) {
-                log.error(String.format("sceIoRename - renaming across devices not allowed '%s' - '%s'", oldFileName, newFileName));
-                result = ERROR_ERRNO_DEVICE_NOT_FOUND;
-            } else {
-            	result = oldVfs.ioRename(localOldFileName.toString(), localNewFileName.toString());
-            }
-    	} else if (useVirtualFileSystem) {
-            log.error(String.format("sceIoRename - device not found '%s'", oldFileName));
-            result = ERROR_ERRNO_DEVICE_NOT_FOUND;
-        } else if (oldpcfilename != null) {
-            if (isUmdPath(oldpcfilename)) {
-                result = -1;
-            } else {
-                File file = new File(oldpcfilename);
-                File newfile = new File(newpcfilename);
-                if (log.isDebugEnabled()) {
-                	log.debug(String.format("sceIoRename: renaming file '%s' to '%s'", oldpcfilename, newpcfilename));
-                }
-                if (file.renameTo(newfile)) {
-                	result = 0;
-                } else {
-                	log.warn(String.format("sceIoRename failed: %s(%s) to %s(%s)", oldFileName, oldpcfilename, newFileName, newpcfilename));
-                	if (file.exists()) {
-                		result = -1;
-                	} else {
-                		result = ERROR_ERRNO_FILE_NOT_FOUND;
-                	}
-                }
-            }
-        } else {
-        	result = -1;
-        }
-
-        for (IIoListener ioListener : ioListeners) {
-            ioListener.sceIoRename(result, pspOldFileName.getAddress(), pspOldFileName.getString(), pspNewFileName.getAddress(), pspNewFileName.getString());
-        }
-        delayIoOperation(IoOperation.rename);
-        return result;
+    	return hleIoRename(pspOldFileName.getAddress(), pspOldFileName.getString(), pspNewFileName.getAddress(), pspNewFileName.getString());
     }
 
     /**
@@ -3546,31 +3799,21 @@ public class IoFileMgrForUser extends HLEModule {
      * @param outlen
      */
     @HLEFunction(nid = 0x54F5FB11, version = 150, checkInsideInterrupt = true)
-    public int sceIoDevctl(PspString devicename, int cmd, int indata_addr, int inlen, int outdata_addr, int outlen) {
+    public int sceIoDevctl(PspString devicename, int cmd, @CanBeNull @BufferInfo(lengthInfo=LengthInfo.nextParameter, usage=Usage.in) TPointer indata, int inlen, @CanBeNull @BufferInfo(lengthInfo=LengthInfo.nextParameter, usage=Usage.out) TPointer outdata, int outlen) {
+    	Map<IoOperation, IoOperationTiming> timings = defaultTimings;
         Memory mem = Processor.memory;
         int result = -1;
-
-        if (log.isDebugEnabled()) {
-            if (Memory.isAddressGood(indata_addr)) {
-                for (int i = 0; i < inlen; i += 4) {
-                    log.debug(String.format("sceIoDevctl indata[%d]=0x%08X", i / 4, mem.read32(indata_addr + i)));
-                }
-            }
-            if (Memory.isAddressGood(outdata_addr)) {
-                for (int i = 0; i < outlen; i += 4) {
-                    log.debug(String.format("sceIoDevctl outdata[%d]=0x%08X", i / 4, mem.read32(outdata_addr + i)));
-                }
-            }
-        }
+        int indataAddr = indata.getAddress();
+        int outdataAddr = outdata.getAddress();
 
         IVirtualFileSystem vfs = vfsManager.getVirtualFileSystem(devicename.getString(), null);
         if (vfs != null) {
-        	result = vfs.ioDevctl(devicename.getString(), cmd, new TPointer(mem, indata_addr), inlen, new TPointer(mem, outdata_addr), outlen);
+        	result = vfs.ioDevctl(devicename.getString(), cmd, indata, inlen, outdata, outlen);
 
         	for (IIoListener ioListener : ioListeners) {
-                ioListener.sceIoDevctl(result, devicename.getAddress(), devicename.getString(), cmd, indata_addr, inlen, outdata_addr, outlen);
+                ioListener.sceIoDevctl(result, devicename.getAddress(), devicename.getString(), cmd, indataAddr, inlen, outdataAddr, outlen);
             }
-            delayIoOperation(IoOperation.iodevctl);
+            delayIoOperation(timings.get(IoOperation.iodevctl));
 
             return result;
     	} else if (useVirtualFileSystem) {
@@ -3578,9 +3821,9 @@ public class IoFileMgrForUser extends HLEModule {
             result = ERROR_ERRNO_DEVICE_NOT_FOUND;
 
             for (IIoListener ioListener : ioListeners) {
-                ioListener.sceIoDevctl(result, devicename.getAddress(), devicename.getString(), cmd, indata_addr, inlen, outdata_addr, outlen);
+                ioListener.sceIoDevctl(result, devicename.getAddress(), devicename.getString(), cmd, indataAddr, inlen, outdataAddr, outlen);
             }
-            delayIoOperation(IoOperation.iodevctl);
+            delayIoOperation(timings.get(IoOperation.iodevctl));
 
             return result;
         }
@@ -3588,12 +3831,32 @@ public class IoFileMgrForUser extends HLEModule {
         boolean needDelayIoOperation = true;
 
         switch (cmd) {
+        	// Check disk region
+        	case 0x01E18030:
+        		if (log.isDebugEnabled()) {
+        			log.debug(String.format("sceIoDevctl 0x%08X check disk region", cmd));
+        		}
+        		if (inlen >= 16) {
+        			int unknown1 = mem.read32(indataAddr + 0);
+        			int unknown2 = mem.read32(indataAddr + 4);
+        			int unknown3 = mem.read32(indataAddr + 8);
+        			int unknown4 = mem.read32(indataAddr + 12);
+            		if (log.isDebugEnabled()) {
+            			log.debug(String.format("sceIoDevctl 0x%08X check disk region unknown1=0x%X, unknown2=0x%X, unknown3=0x%X, unknown4=0x%X", cmd, unknown1, unknown2, unknown3, unknown4));
+            		}
+            		// Return 0 if the disk region is not matching,
+            		// return 1 if the disk region is matching.
+            		result = 1;
+        		} else {
+        			result = -1;
+        		}
+        		break;
             // Get UMD disc type.
             case 0x01F20001: {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " get disc type");
                 }
-                if (Memory.isAddressGood(outdata_addr) && outlen >= 8) {
+                if (Memory.isAddressGood(outdataAddr) && outlen >= 8) {
                     // 0 = No disc.
                     // 0x10 = Game disc.
                     // 0x20 = Video disc.
@@ -3601,11 +3864,36 @@ public class IoFileMgrForUser extends HLEModule {
                     // 0x80 = Cleaning disc.
                     int out;
                     if (iso == null) {
-                    	out = 0;
+                    	out = 0; // No disc
                     } else {
-                    	out = 0x10;  // Always return game disc (if present).
+                    	out = 0x10;  // Return game disc by default
+
+                    	// Retrieve the disc type from the UMD_DATA.BIN file
+                    	IVirtualFileSystem vfsIso = new UmdIsoVirtualFileSystem(iso);
+            			IVirtualFile vfsUmdData = vfsIso.ioOpen("UMD_DATA.BIN", 0, PSP_O_RDONLY);
+            			if (vfsUmdData != null) {
+            				byte buffer[] = new byte[(int) vfsUmdData.length()];
+            				int length = vfsUmdData.ioRead(buffer, 0, buffer.length);
+            				if (length > 0) {
+            					String umdData = new String(buffer);
+            					String[] umdDataParts = umdData.split("\\|");
+            					if (umdDataParts != null && umdDataParts.length >= 4) {
+            						String umdType = umdDataParts[3];
+            						if (umdType != null && umdType.length() > 0) {
+	            						switch (umdType.charAt(0)) {
+	            							case 'G': out = 0x10; break; // Game disc
+	            							case 'V': out = 0x20; break; // Video disc
+	            							default:
+	            								log.warn(String.format("Unknown disc type '%s' in UMD_DATA.BIN", umdType));
+	            								break;
+	            						}
+            						}
+            					}
+            				}
+            				vfsUmdData.ioClose();
+            			}
                     }
-                    mem.write32(outdata_addr + 4, out);
+                    mem.write32(outdataAddr + 4, out);
                     result = 0;
                 } else {
                 	result = -1;
@@ -3617,8 +3905,8 @@ public class IoFileMgrForUser extends HLEModule {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " get current LBA");
                 }
-                if (Memory.isAddressGood(outdata_addr) && outlen >= 4) {
-                    mem.write32(outdata_addr, 0); // Assume first sector.
+                if (Memory.isAddressGood(outdataAddr) && outlen >= 4) {
+                    mem.write32(outdataAddr, 0); // Assume first sector.
                     result = 0;
                 } else {
                 	result = -1;
@@ -3630,8 +3918,8 @@ public class IoFileMgrForUser extends HLEModule {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " seek UMD disc");
                 }
-                if ((Memory.isAddressGood(indata_addr) && inlen >= 4)) {
-                    int sector = mem.read32(indata_addr);
+                if ((Memory.isAddressGood(indataAddr) && inlen >= 4)) {
+                    int sector = mem.read32(indataAddr);
                     if (log.isDebugEnabled()) {
                         log.debug("sector=" + sector);
                     }
@@ -3646,12 +3934,12 @@ public class IoFileMgrForUser extends HLEModule {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " prepare UMD data to cache");
                 }
-                if ((Memory.isAddressGood(indata_addr) && inlen >= 4)) {
+                if ((Memory.isAddressGood(indataAddr) && inlen >= 4)) {
                     // UMD cache read struct (16-bytes).
-                    int unk1 = mem.read32(indata_addr); // NULL.
-                    int sector = mem.read32(indata_addr + 4);  // First sector of data to read.
-                    int unk2 = mem.read32(indata_addr + 8); // NULL.
-                    int sectorNum = mem.read32(indata_addr + 12);  // Length of data to read.
+                    int unk1 = mem.read32(indataAddr); // NULL.
+                    int sector = mem.read32(indataAddr + 4);  // First sector of data to read.
+                    int unk2 = mem.read32(indataAddr + 8); // NULL.
+                    int sectorNum = mem.read32(indataAddr + 12);  // Length of data to read.
                     if (log.isDebugEnabled()) {
                         log.debug(String.format("sector=%d, sectorNum=%d, unk1=%d, unk2=%d", sector, sectorNum, unk1, unk2));
                     }
@@ -3666,16 +3954,16 @@ public class IoFileMgrForUser extends HLEModule {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " prepare UMD data to cache and get status");
                 }
-                if ((Memory.isAddressGood(indata_addr) && inlen >= 4) && (Memory.isAddressGood(outdata_addr) && outlen >= 4)) {
+                if ((Memory.isAddressGood(indataAddr) && inlen >= 4) && (Memory.isAddressGood(outdataAddr) && outlen >= 4)) {
                     // UMD cache read struct (16-bytes).
-                    int unk1 = mem.read32(indata_addr); // NULL.
-                    int sector = mem.read32(indata_addr + 4);  // First sector of data to read.
-                    int unk2 = mem.read32(indata_addr + 8); // NULL.
-                    int sectorNum = mem.read32(indata_addr + 12);  // Length of data to read.
+                    int unk1 = mem.read32(indataAddr); // NULL.
+                    int sector = mem.read32(indataAddr + 4);  // First sector of data to read.
+                    int unk2 = mem.read32(indataAddr + 8); // NULL.
+                    int sectorNum = mem.read32(indataAddr + 12);  // Length of data to read.
                     if (log.isDebugEnabled()) {
                         log.debug(String.format("sector=%d, sectorNum=%d, unk1=%d, unk2=%d", sector, sectorNum, unk1, unk2));
                     }
-                    mem.write32(outdata_addr, 1); // Status (unitary index of the requested read, greater or equal to 1).
+                    mem.write32(outdataAddr, 1); // Status (unitary index of the requested read, greater or equal to 1).
                     result = 0;
                 } else {
                 	result = -1;
@@ -3687,8 +3975,8 @@ public class IoFileMgrForUser extends HLEModule {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " wait for the UMD data cache thread");
                 }
-                if ((Memory.isAddressGood(indata_addr) && inlen >= 4)) {
-                    int index = mem.read32(indata_addr); // Index set by command 0x01F300A5.
+                if ((Memory.isAddressGood(indataAddr) && inlen >= 4)) {
+                    int index = mem.read32(indataAddr); // Index set by command 0x01F300A5.
                     if (log.isDebugEnabled()) {
                         log.debug(String.format("index=%d", index));
                     }
@@ -3710,8 +3998,8 @@ public class IoFileMgrForUser extends HLEModule {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " poll the UMD data cache thread");
                 }
-                if ((Memory.isAddressGood(indata_addr) && inlen >= 4)) {
-                    int index = mem.read32(indata_addr); // Index set by command 0x01F300A5.
+                if ((Memory.isAddressGood(indataAddr) && inlen >= 4)) {
+                    int index = mem.read32(indataAddr); // Index set by command 0x01F300A5.
                     if (log.isDebugEnabled()) {
                         log.debug(String.format("index=%d", index));
                     }
@@ -3729,8 +4017,8 @@ public class IoFileMgrForUser extends HLEModule {
                 if (log.isDebugEnabled()) {
                     log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " cancel the UMD data cache thread");
                 }
-                if ((Memory.isAddressGood(indata_addr) && inlen >= 4)) {
-                    int index = mem.read32(indata_addr); // Index set by command 0x01F300A5.
+                if ((Memory.isAddressGood(indataAddr) && inlen >= 4)) {
+                    int index = mem.read32(indataAddr); // Index set by command 0x01F300A5.
                     if (log.isDebugEnabled()) {
                         log.debug(String.format("index=%d", index));
                     }
@@ -3754,10 +4042,10 @@ public class IoFileMgrForUser extends HLEModule {
                 log.debug("sceIoDevctl " + String.format("0x%08X", cmd) + " check ms driver status");
                 if (!devicename.getString().equals("mscmhc0:")) {
                 	result = ERROR_KERNEL_UNSUPPORTED_OPERATION;
-                } else if (Memory.isAddressGood(outdata_addr)) {
+                } else if (Memory.isAddressGood(outdataAddr)) {
                     // 0 = Driver busy.
-                    // 1 = Driver ready.
-                    mem.write32(outdata_addr, 4);
+                    // 4 = Driver ready.
+                    mem.write32(outdataAddr, 4);
                     result = 0;
                 } else {
                 	result = -1;
@@ -3770,8 +4058,8 @@ public class IoFileMgrForUser extends HLEModule {
                 ThreadManForUser threadMan = Modules.ThreadManForUserModule;
                 if (!devicename.getString().equals("mscmhc0:")) {
                 	result = ERROR_KERNEL_UNSUPPORTED_OPERATION;
-                } else if (Memory.isAddressGood(indata_addr) && inlen == 4) {
-                    int cbid = mem.read32(indata_addr);
+                } else if (Memory.isAddressGood(indataAddr) && inlen == 4) {
+                    int cbid = mem.read32(indataAddr);
                     final int callbackType = SceKernelThreadInfo.THREAD_CALLBACK_MEMORYSTICK;
                     if (threadMan.hleKernelRegisterCallback(callbackType, cbid)) {
                         // Trigger the registered callback immediately.
@@ -3791,13 +4079,38 @@ public class IoFileMgrForUser extends HLEModule {
                 ThreadManForUser threadMan = Modules.ThreadManForUserModule;
                 if (!devicename.getString().equals("mscmhc0:")) {
                 	result = ERROR_KERNEL_UNSUPPORTED_OPERATION;
-                } else if (Memory.isAddressGood(indata_addr) && inlen == 4) {
-                    int cbid = mem.read32(indata_addr);
-                    if (threadMan.hleKernelUnRegisterCallback(SceKernelThreadInfo.THREAD_CALLBACK_MEMORYSTICK, cbid) != null) {
+                } else if (Memory.isAddressGood(indataAddr) && inlen == 4) {
+                    int cbid = mem.read32(indataAddr);
+                    if (threadMan.hleKernelUnRegisterCallback(SceKernelThreadInfo.THREAD_CALLBACK_MEMORYSTICK, cbid)) {
                     	result = 0; // Success.
                     } else {
                     	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS; // No such callback.
                     }
+                } else {
+                	result = -1; // Invalid parameters.
+                }
+                break;
+            }
+            // ???
+            case 0x02015807: {
+                log.debug("sceIoDevctl ??? (mscmhc0)");
+                if (!devicename.getString().equals("mscmhc0:")) {
+                	result = ERROR_KERNEL_UNSUPPORTED_OPERATION;
+                } else if (Memory.isAddressGood(outdataAddr) && outlen == 4) {
+                	mem.write32(outdataAddr, 0); // Unknown value: seems to be 0 or 1?
+                	result = 0; // Success.
+                } else {
+                	result = -1; // Invalid parameters.
+                }
+                break;
+            }
+            // ???
+            case 0x0201580B: {
+                log.debug("sceIoDevctl ??? (mscmhc0)");
+                if (!devicename.getString().equals("mscmhc0:")) {
+                	result = ERROR_KERNEL_UNSUPPORTED_OPERATION;
+                } else if (Memory.isAddressGood(indataAddr) && inlen == 20) {
+                	result = 0; // Success.
                 } else {
                 	result = -1; // Invalid parameters.
                 }
@@ -3808,10 +4121,41 @@ public class IoFileMgrForUser extends HLEModule {
                 log.debug("sceIoDevctl check ms inserted (mscmhc0)");
                 if (!devicename.getString().equals("mscmhc0:")) {
                 	result = ERROR_KERNEL_UNSUPPORTED_OPERATION;
-                } else if (Memory.isAddressGood(outdata_addr)) {
+                } else if (Memory.isAddressGood(outdataAddr)) {
                     // 0 = Not inserted.
                     // 1 = Inserted.
-                    mem.write32(outdata_addr, 1);
+                    mem.write32(outdataAddr, 1);
+                    result = 0;
+                } else {
+                	result = -1;
+                }
+                break;
+            }
+            // ???
+            case 0x0202580A: {
+                log.debug("sceIoDevctl ??? (mscmhc0)");
+                if (!devicename.getString().equals("mscmhc0:")) {
+                	result = ERROR_KERNEL_UNSUPPORTED_OPERATION;
+                } else if (Memory.isAddressGood(outdataAddr) && outlen == 16) {
+                	// When value1 or value2 are < 10000, sceUtilitySavedata is
+                	// returning an error 0x8011032C (bad status).
+                	// When value1 or value2 are > 10000, sceUtilitySavedata is
+                	// returning an error 0x8011032A (the system has been shifted to sleep mode).
+                	final int value1 = 10000;
+                	final int value2 = 10000;
+                	// When value3 or value4 are < 10000, sceUtilitySavedata is
+                	// returning an error 0x8011032C (bad status)
+                	// When value3 or value4 are > 10000, sceUtilitySavedata is
+                	// returning an error 0x80110322 (the memory stick has been removed).
+                	final int value3 = 10000;
+                	final int value4 = 10000;
+                	// No error is returned by sceUtilitySavedata only when
+                	// all 4 values are set to 10000.
+
+                    mem.write32(outdataAddr +  0, value1);
+                    mem.write32(outdataAddr +  4, value2);
+                    mem.write32(outdataAddr +  8, value3);
+                    mem.write32(outdataAddr + 12, value4);
                     result = 0;
                 } else {
                 	result = -1;
@@ -3825,8 +4169,8 @@ public class IoFileMgrForUser extends HLEModule {
                 ThreadManForUser threadMan = Modules.ThreadManForUserModule;
                 if (!devicename.getString().equals("fatms0:")) {
                 	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS;
-                } else if (Memory.isAddressGood(indata_addr) && inlen == 4) {
-                    int cbid = mem.read32(indata_addr);
+                } else if (Memory.isAddressGood(indataAddr) && inlen == 4) {
+                    int cbid = mem.read32(indataAddr);
                     final int callbackType = SceKernelThreadInfo.THREAD_CALLBACK_MEMORYSTICK_FAT;
                     if (threadMan.hleKernelRegisterCallback(callbackType, cbid)) {
                         // Trigger the registered callback immediately.
@@ -3848,8 +4192,8 @@ public class IoFileMgrForUser extends HLEModule {
                 ThreadManForUser threadMan = Modules.ThreadManForUserModule;
                 if (!devicename.getString().equals("fatms0:")) {
                 	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS;
-                } else if (Memory.isAddressGood(indata_addr) && inlen == 4) {
-                    int cbid = mem.read32(indata_addr);
+                } else if (Memory.isAddressGood(indataAddr) && inlen == 4) {
+                    int cbid = mem.read32(indataAddr);
                     threadMan.hleKernelUnRegisterCallback(SceKernelThreadInfo.THREAD_CALLBACK_MEMORYSTICK_FAT, cbid);
                     result = 0;  // Success.
                 } else {
@@ -3862,25 +4206,36 @@ public class IoFileMgrForUser extends HLEModule {
                 log.debug("sceIoDevctl set assigned device (fatms0)");
                 if (!devicename.getString().equals("fatms0:")) {
                 	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS;
-                } else if (Memory.isAddressGood(indata_addr) && inlen >= 4) {
+                } else if (Memory.isAddressGood(indataAddr) && inlen >= 4) {
                     // 0 - Device is not assigned (callback not registered).
                     // 1 - Device is assigned (callback registered).
-                    MemoryStick.setStateFatMs(mem.read32(indata_addr));
+                    MemoryStick.setStateFatMs(mem.read32(indataAddr));
                     result = 0;
                 } else {
                 	result = -1;
                 }
                 break;
             }
+            case 0x02415857: {
+                if (!devicename.getString().equals("ms0:")) {
+                	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS;
+                } else if (Memory.isAddressGood(outdataAddr) && outlen == 4) {
+                	mem.write32(outdataAddr, 0); // Unknown value
+            		result = 0;
+            	} else {
+                	result = SceKernelErrors.ERROR_ERRNO_INVALID_ARGUMENT;
+            	}
+            	break;
+            }
             // Check if the device is write protected (fatms0).
             case 0x02425824: {
                 log.debug("sceIoDevctl check write protection (fatms0)");
                 if (!devicename.getString().equals("fatms0:") && !devicename.getString().equals("ms0:")) { // For this command the alias "ms0:" is also supported.
                 	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS;
-                } else if (Memory.isAddressGood(outdata_addr)) {
+                } else if (Memory.isAddressGood(outdataAddr)) {
                     // 0 - Device is not protected.
                     // 1 - Device is protected.
-                    mem.write32(outdata_addr, 0);
+                    mem.write32(outdataAddr, 0);
                     result = 0;
                 } else {
                 	result = -1;
@@ -3892,11 +4247,11 @@ public class IoFileMgrForUser extends HLEModule {
                 log.debug("sceIoDevctl get MS capacity (fatms0)");
                 int sectorSize = 0x200;
                 int sectorCount = MemoryStick.getSectorSize() / sectorSize;
-                int maxClusters = (int) ((MemoryStick.getFreeSize() * 95L / 100) / (sectorSize * sectorCount));
+                int maxClusters = (int) (MemoryStick.getFreeSize() / (sectorSize * sectorCount));
                 int freeClusters = maxClusters;
                 int maxSectors = maxClusters;
-                if (Memory.isAddressGood(indata_addr) && inlen >= 4) {
-                    int addr = mem.read32(indata_addr);
+                if (Memory.isAddressGood(indataAddr) && inlen >= 4) {
+                    int addr = mem.read32(indataAddr);
                     if (Memory.isAddressGood(addr)) {
                         log.debug("sceIoDevctl refer ms free space");
                         mem.write32(addr, maxClusters);
@@ -3910,7 +4265,7 @@ public class IoFileMgrForUser extends HLEModule {
                         result = -1;
                     }
                 } else {
-                    log.warn("sceIoDevctl 0x02425818 bad param address " + String.format("0x%08X", indata_addr) + " or size " + inlen);
+                    log.warn("sceIoDevctl 0x02425818 bad param address " + String.format("0x%08X", indataAddr) + " or size " + inlen);
                     result = -1;
                 }
                 break;
@@ -3921,10 +4276,10 @@ public class IoFileMgrForUser extends HLEModule {
                 needDelayIoOperation = false;
                 if (!devicename.getString().equals("fatms0:")) {
                 	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS;
-                } else if (Memory.isAddressGood(outdata_addr) && outlen >= 4) {
+                } else if (Memory.isAddressGood(outdataAddr) && outlen >= 4) {
                     // 0 - Device is not assigned (callback not registered).
                     // 1 - Device is assigned (callback registered).
-                    mem.write32(outdata_addr, MemoryStick.getStateFatMs());
+                    mem.write32(outdataAddr, MemoryStick.getStateFatMs());
                     result = 0;
                 } else {
                 	result = -1;
@@ -3934,7 +4289,7 @@ public class IoFileMgrForUser extends HLEModule {
             // Register USB thread.
             case 0x03415001: {
                 log.debug("sceIoDevctl register usb thread");
-                if (Memory.isAddressGood(indata_addr) && inlen >= 4) {
+                if (Memory.isAddressGood(indataAddr) && inlen >= 4) {
                     // Unknown params.
                 	result = 0;
                 } else {
@@ -3945,7 +4300,7 @@ public class IoFileMgrForUser extends HLEModule {
             // Unregister USB thread.
             case 0x03415002: {
                 log.debug("sceIoDevctl unregister usb thread");
-                if (Memory.isAddressGood(indata_addr) && inlen >= 4) {
+                if (Memory.isAddressGood(indataAddr) && inlen >= 4) {
                     // Unknown params.
                 	result = 0;
                 } else {
@@ -3953,22 +4308,65 @@ public class IoFileMgrForUser extends HLEModule {
                 }
                 break;
             }
+            case 0x02425856: {
+            	if (Memory.isAddressGood(indataAddr) && inlen >= 4) {
+            		// This is the value contained in the registry entry
+            		//	"/CONFIG/SYSTEM/CHARACTER_SET/oem"
+            		int characterSet = mem.read32(indataAddr);
+            		if (log.isDebugEnabled()) {
+            			log.debug(String.format("sceIoDevctl '%s' set character set to 0x%X", devicename.getString(), characterSet));
+            		}
+            		result = 0;
+            	}
+            	break;
+            }
+            case 0x02415830: {
+            	if (Memory.isAddressGood(indataAddr) && inlen >= 8) {
+            		int oldFileNameAddr = mem.read32(indataAddr);
+            		int newFileNameAddr = mem.read32(indataAddr + 4);
+            		String oldFileName = Utilities.readStringZ(mem, oldFileNameAddr);
+            		String newFileName = Utilities.readStringZ(mem, newFileNameAddr);
+
+            		result = hleIoRename(oldFileNameAddr, devicename.getString() + oldFileName, newFileNameAddr, devicename.getString() + newFileName);
+
+            		if (log.isDebugEnabled()) {
+            			log.debug(String.format("sceIoDevctl file rename oldFileName='%s', newFileName='%s', result=0x%X", oldFileName, newFileName, result));
+            		}
+            	}
+            	break;
+            }
+            case 0x00005802: {
+                if (!devicename.getString().equals("flash1:")) {
+                	result = ERROR_MEMSTICK_DEVCTL_BAD_PARAMS;
+                } else {
+                    result = 0;
+                }
+                break;
+            }
+            // Check if LoadExec is allowed on the device
+            case 0x00208813: {
+            	if (log.isDebugEnabled()) {
+            		log.debug(String.format("Checking if LoadExec is allowed on '%s'", devicename));
+            	}
+            	// Result == 0: LoadExec allowed
+            	// Result != 0: LoadExec prohibited
+            	result = 0;
+            	break;
+            }
             default:
-                log.warn("sceIoDevctl " + String.format("0x%08X", cmd) + " unknown command");
-                if (Memory.isAddressGood(indata_addr)) {
-                    for (int i = 0; i < inlen; i += 4) {
-                        log.warn("sceIoDevctl indata[" + (i / 4) + "]=0x" + Integer.toHexString(mem.read32(indata_addr + i)));
-                    }
+                log.warn(String.format("sceIoDevctl 0x%08X unknown command", cmd));
+                if (Memory.isAddressGood(indataAddr)) {
+                    log.warn(String.format("sceIoDevctl indata: %s", Utilities.getMemoryDump(indataAddr, inlen)));
                 }
                 result = SceKernelErrors.ERROR_ERRNO_INVALID_IODEVCTL_CMD;
                 break;
         }
         for (IIoListener ioListener : ioListeners) {
-            ioListener.sceIoDevctl(result, devicename.getAddress(), devicename.getString(), cmd, indata_addr, inlen, outdata_addr, outlen);
+            ioListener.sceIoDevctl(result, devicename.getAddress(), devicename.getString(), cmd, indataAddr, inlen, outdataAddr, outlen);
         }
 
         if (needDelayIoOperation) {
-        	delayIoOperation(IoOperation.iodevctl);
+        	delayIoOperation(timings.get(IoOperation.iodevctl));
         }
 
         return result;
@@ -3983,16 +4381,25 @@ public class IoFileMgrForUser extends HLEModule {
      */
     @HLEFunction(nid = 0x08BD7374, version = 150, checkInsideInterrupt = true)
     public int sceIoGetDevType(int id) {
-        IoInfo info = fileIds.get(id);
         int result;
-        if (info == null) {
-            log.warn("sceIoGetDevType - unknown id " + Integer.toHexString(id));
-            result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
-        } else {
-            // For now, return alias type, since it's the most used.
-            result = PSP_DEV_TYPE_ALIAS;
+
+        if (id == STDIN_ID || id == STDOUT_ID || id == STDERR_ID) {
+    		result = PSP_DEV_TYPE_FILESYSTEM;
+    	} else {
+	    	IoInfo info = fileIds.get(id);
+	        if (info == null) {
+	            log.warn("sceIoGetDevType - unknown id " + Integer.toHexString(id));
+	            result = ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
+	        } else {
+	            // For now, return alias type, since it's the most used.
+	            result = PSP_DEV_TYPE_ALIAS;
+	        }
+    	}
+
+        if (log.isDebugEnabled()) {
+        	log.debug(String.format("sceIoGetDevType id=0x%X returning 0x%X", id, result));
         }
-        
+
         return result;
     }
 
@@ -4098,5 +4505,20 @@ public class IoFileMgrForUser extends HLEModule {
     	fdNumAddr.setValue(fileIds.size());
 
         return count;
+    }
+
+    /**
+     * Reopens an existing file descriptor.
+     *
+     * @param filename    the new file to open.
+     * @param flags       the open flags.
+     * @param permissions the open mode.
+     * @param id          the old file descriptor to reopen.
+     * @return            < 0 on error, otherwise the reopened file descriptor.
+     */
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x3C54E908, version = 150)
+    public int sceIoReopen(PspString filename, int flags, int permissions, int id) {
+    	return -1;
     }
 }

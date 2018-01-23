@@ -18,6 +18,7 @@ package jpcsp.HLE.modules;
 
 import static jpcsp.HLE.modules.sceNetAdhocctl.IBSS_NAME_LENGTH;
 import static jpcsp.HLE.modules.sceNetAdhocctl.fillNextPointersInLinkedList;
+import jpcsp.HLE.BufferInfo;
 import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
@@ -34,8 +35,10 @@ import java.util.HashMap;
 import org.apache.log4j.Logger;
 
 import jpcsp.HLE.Modules;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.kernel.managers.SceUidManager;
 import jpcsp.HLE.kernel.types.SceKernelThreadInfo;
+import jpcsp.HLE.kernel.types.pspNetMacAddress;
 import jpcsp.hardware.Wlan;
 import jpcsp.settings.Settings;
 import jpcsp.Emulator;
@@ -83,6 +86,7 @@ public class sceNetApctl extends HLEModule {
 	public static final int PSP_NET_APCTL_INFO_8021_EAP_TYPE = 16;
 	public static final int PSP_NET_APCTL_INFO_START_BROWSER = 17;
 	public static final int PSP_NET_APCTL_INFO_WIFISP        = 18;
+	public static final int PSP_NET_APCTL_INFO_UNKNOWN19     = 19;
 	private static final String[] apctlInfoNames = new String[] {
 		"PROFILE_NAME",
 		"BSSID",
@@ -105,20 +109,29 @@ public class sceNetApctl extends HLEModule {
 		"WIFISP"
 	};
 
-	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_NONE = 0;
-	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_WEP  = 1;
-	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_WPA  = 2;
+	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_NONE        = 0;
+	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_WEP         = 1;
+	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_WPA_TKIP    = 2;
+	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_UNSUPPORTED = 3;
+	public static final int PSP_NET_APCTL_INFO_SECURITY_TYPE_WPA_AES     = 4;
+
+	public static final int PSP_NET_APCTL_DESC_IBSS = 0;
+	public static final int PSP_NET_APCTL_DESC_SSID_NAME = 1;
+	public static final int PSP_NET_APCTL_DESC_SSID_NAME_LENGTH = 2;
+	public static final int PSP_NET_APCTL_DESC_SIGNAL_STRENGTH = 4;
+	public static final int PSP_NET_APCTL_DESC_SECURITY = 5;
 
 	public static final int SSID_NAME_LENGTH = 32;
 
 	private static final String dummyPrimaryDNS = "1.2.3.4";
 	private static final String dummySecondaryDNS = "1.2.3.5";
-	private static final String dummyGateway = "1.2.3.0";
 	private static final String dummySubnetMask = "255.255.255.0";
 	private static final int dummySubnetMaskInt = 0xFFFFFF00;
 
     protected static final String uidPurpose = "sceNetApctl";
+    protected static final String uidHandlerPurpose = "sceNetApctlHandler";
     protected int state = PSP_NET_APCTL_STATE_DISCONNECTED;
+    protected int connectionIndex = 0;
 	private static String localHostIP;
     private HashMap<Integer, ApctlHandler> apctlHandlers = new HashMap<Integer, ApctlHandler>();
     protected static final int stateTransitionDelay = 100000; // 100ms
@@ -259,7 +272,16 @@ public class sceNetApctl extends HLEModule {
 	}
 
     public static String getGateway() {
-		return dummyGateway;
+    	String gateway = getLocalHostIP();
+
+    	// Replace last component of the local IP with "1".
+    	// E.g. "192.168.1.10" -> "192.168.1.1"
+    	int lastDot = gateway.lastIndexOf('.');
+    	if (lastDot >= 0) {
+    		gateway = gateway.substring(0, lastDot + 1) + "1";
+    	}
+
+    	return gateway;
 	}
 
     public static String getSubnetMask() {
@@ -313,6 +335,7 @@ public class sceNetApctl extends HLEModule {
 		if (log.isDebugEnabled()) {
 			log.debug(String.format("hleNetApctlConnect index=%d", index));
 		}
+		connectionIndex = index;
 
 		changeState(PSP_NET_APCTL_STATE_JOINING);
 	}
@@ -329,7 +352,7 @@ public class sceNetApctl extends HLEModule {
 
 	public void hleNetApctlThread(Processor processor) {
 		if (log.isDebugEnabled()) {
-			log.debug("hleNetApctlThread");
+			log.debug(String.format("hleNetApctlThread state=%d", state));
 		}
 
 		if (sceNetApctlThreadTerminate) {
@@ -367,10 +390,18 @@ public class sceNetApctl extends HLEModule {
 		    		}
 			}
 
-	    	if (stateTransitionCompleted) {
+			if (stateTransitionCompleted) {
+				if (log.isDebugEnabled()) {
+					log.debug(String.format("hleNetApctlThread sleeping with state=%d", state));
+				}
+
 	    		// Wait for a new state reset... wakeup is done by triggerNetApctlThread()
 	    		Modules.ThreadManForUserModule.hleKernelSleepThread(false);
 	    	} else {
+				if (log.isDebugEnabled()) {
+					log.debug(String.format("hleNetApctlThread waiting for %d us with state=%d", stateTransitionDelay, state));
+				}
+
 	    		// Wait a little bit before moving to the next state...
 	    		Modules.ThreadManForUserModule.hleKernelDelayThread(stateTransitionDelay, false);
 	    	}
@@ -450,10 +481,18 @@ public class sceNetApctl extends HLEModule {
 	@HLEFunction(nid = 0x2BEFDF23, version = 150)
 	public int sceNetApctlGetInfo(int code, TPointer pInfo) {
 		if (log.isDebugEnabled()) {
-			log.debug(String.format("sceNetApctlGetInfo code%s", getApctlInfoName(code)));
+			log.debug(String.format("sceNetApctlGetInfo code=0x%X(%s)", code, getApctlInfoName(code)));
 		}
 
 		switch (code) {
+			case PSP_NET_APCTL_INFO_PROFILE_NAME: {
+				String name = sceUtility.getNetParamName(connectionIndex);
+				pInfo.setStringNZ(128, name);
+				if (log.isDebugEnabled()) {
+					log.debug(String.format("sceNetApctlGetInfo returning Profile name '%s'", name));
+				}
+				break;
+			}
 			case PSP_NET_APCTL_INFO_IP: {
 				String ip = getLocalHostIP();
 				pInfo.setStringNZ(16, ip);
@@ -507,11 +546,22 @@ public class sceNetApctl extends HLEModule {
 				break;
 			}
 			case PSP_NET_APCTL_INFO_USE_PROXY: {
-				pInfo.setValue32(0); // Don't use proxy
+				pInfo.setValue32(false); // Don't use proxy
+				break;
+			}
+			case PSP_NET_APCTL_INFO_START_BROWSER: {
+				// Is it needed to start the browser to login/authenticate
+				// this connection?
+				pInfo.setValue32(false); // Do not start the browser
+				break;
+			}
+			case PSP_NET_APCTL_INFO_UNKNOWN19: {
+				// The PSP is returning value 1 (tested with JpcspTrace)
+				pInfo.setValue32(1);
 				break;
 			}
 			default: {
-				log.warn(String.format("sceNetApctlGetInfo unimplemented code=%d(%s)", code, getApctlInfoName(code)));
+				log.warn(String.format("sceNetApctlGetInfo unimplemented code=0x%X(%s)", code, getApctlInfoName(code)));
 				return -1;
 			}
 		}
@@ -591,7 +641,7 @@ public class sceNetApctl extends HLEModule {
 	 * @return < 0 on error.
 	 */
 	@HLEFunction(nid = 0x5DEAC81B, version = 150)
-	public int sceNetApctlGetState(TPointer32 stateAddr) {
+	public int sceNetApctlGetState(@BufferInfo(usage=Usage.out) TPointer32 stateAddr) {
 		stateAddr.setValue(state);
 
 		return 0;
@@ -660,23 +710,27 @@ public class sceNetApctl extends HLEModule {
 	@HLEFunction(nid = 0x04776994, version = 150)
 	public int sceNetApctlGetBSSDescEntryUser(int entryId, int infoId, TPointer result) {
 		switch (infoId) {
-			case 0: // IBSS, 6 bytes
+			case PSP_NET_APCTL_DESC_IBSS: // IBSS, 6 bytes
 				String ibss = Modules.sceNetAdhocctlModule.hleNetAdhocctlGetIBSS();
 				result.setStringNZ(IBSS_NAME_LENGTH, ibss);
 				break;
-			case 1:
+			case PSP_NET_APCTL_DESC_SSID_NAME:
 				// Return 32 bytes
 				String ssid = getSSID();
 				result.setStringNZ(SSID_NAME_LENGTH, ssid);
 				break;
-			case 2:
+			case PSP_NET_APCTL_DESC_SSID_NAME_LENGTH:
 				// Return one 32-bit value
 				int length = Math.min(getSSID().length(), SSID_NAME_LENGTH);
 				result.setValue32(length);
 				break;
-			case 4:
+			case PSP_NET_APCTL_DESC_SIGNAL_STRENGTH:
 				// Return 1 byte
 				result.setValue8((byte) Wlan.getSignalStrenth());
+				break;
+			case PSP_NET_APCTL_DESC_SECURITY:
+				// Return one 32-bit value
+				result.setValue32(PSP_NET_APCTL_INFO_SECURITY_TYPE_WPA_AES);
 				break;
 			default:
 				log.warn(String.format("sceNetApctlGetBSSDescEntryUser unknown id %d", infoId));
@@ -684,5 +738,64 @@ public class sceNetApctl extends HLEModule {
 		}
 
 		return 0;
+	}
+
+	@HLEFunction(nid = 0x7CFAB990, version = 150)
+	public int sceNetApctlAddInternalHandler(TPointer handler, int handlerArg) {
+		// This seems to be a 2nd kind of handler
+		return sceNetApctlAddHandler(handler, handlerArg);
+	}
+
+	@HLEFunction(nid = 0xE11BAFAB, version = 150)
+	public int sceNetApctlDelInternalHandler(int handlerId) {
+		// This seems to be a 2nd kind of handler
+		return sceNetApctlDelHandler(handlerId);
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xA7BB73DF, version = 150)
+	public int sceNetApctl_A7BB73DF(TPointer handler, int handlerArg) {
+		// This seems to be a 3rd kind of handler
+		return sceNetApctlAddHandler(handler, handlerArg);
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x6F5D2981, version = 150)
+	public int sceNetApctl_6F5D2981(int handlerId) {
+		// This seems to be a 3rd kind of handler
+		return sceNetApctlDelHandler(handlerId);
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x69745F0A, version = 150)
+	public int sceNetApctl_lib2_69745F0A(int handlerId) {
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x4C19731F, version = 150)
+	public int sceNetApctl_lib2_4C19731F(int code, TPointer pInfo) {
+		return sceNetApctlGetInfo(code, pInfo);
+	}
+
+	@HLEFunction(nid = 0xB3CF6849, version = 150)
+	public int sceNetApctlScan() {
+		return sceNetApctlScanUser();
+	}
+
+	@HLEFunction(nid = 0x0C7FFA5C, version = 150)
+	public int sceNetApctlGetBSSDescIDList(TPointer32 sizeAddr, @CanBeNull TPointer buf) {
+		return sceNetApctlGetBSSDescIDListUser(sizeAddr, buf);
+	}
+
+	@HLEFunction(nid = 0x96BEB231, version = 150)
+	public int sceNetApctlGetBSSDescEntry(int entryId, int infoId, TPointer result) {
+		return sceNetApctlGetBSSDescEntryUser(entryId, infoId, result);
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xC20A144C, version = 150)
+	public int sceNetApctl_lib2_C20A144C(int connIndex, pspNetMacAddress ps3MacAddress) {
+		return sceNetApctlConnect(connIndex);
 	}
 }

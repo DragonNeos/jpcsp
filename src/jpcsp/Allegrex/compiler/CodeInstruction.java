@@ -20,6 +20,8 @@ import static jpcsp.Allegrex.Common._ra;
 import static jpcsp.Allegrex.Common._zr;
 import static jpcsp.Allegrex.Common.Instruction.FLAG_WRITES_RD;
 import static jpcsp.Allegrex.Common.Instruction.FLAG_WRITES_RT;
+import static jpcsp.HLE.modules.ThreadManForUser.NOP;
+
 import jpcsp.Emulator;
 import jpcsp.Allegrex.Instructions;
 import jpcsp.Allegrex.Common.Instruction;
@@ -46,6 +48,7 @@ public class CodeInstruction {
 	private boolean isBranching;
 	private Label label;
 	private boolean isDelaySlot;
+	private boolean useMMIO;
 
     protected CodeInstruction() {
     }
@@ -156,13 +159,13 @@ public class CodeInstruction {
     	label = new Label();
     }
 
-    private void setLabel(Label label) {
+    protected void setLabel(Label label) {
     	this.label = label;
     }
 
     protected void startCompile(CompilerContext context, MethodVisitor mv) {
         if (log.isDebugEnabled()) {
-            log.debug("CodeInstruction.compile " + toString());
+            log.debug(toString());
         }
 
         context.setCodeInstruction(this);
@@ -185,6 +188,8 @@ public class CodeInstruction {
 	        compileJr(context, mv);
         } else if (insn == Instructions.JALR) {
             compileJalr(context, mv);
+        } else if (insn == Instructions.ERET) {
+        	context.compileEret();
         } else if (interpretAllVfpuInstructions && insn.category().startsWith("VFPU")) {
         	context.visitIntepreterCall(opcode, insn);
 	    } else {
@@ -207,7 +212,14 @@ public class CodeInstruction {
     	// Retrieve the call address from the Rs register before executing
     	// the delay slot instruction, as it might theoretically modify the
     	// content of the Rs register.
-        context.loadRs();       
+        context.loadRs();
+
+        // It seems the PSP ignores the lowest 2 bits of the address.
+        // These bits are used and set by interruptman.prx
+        // but never cleared explicitly before executing a jalr instruction.
+        context.loadImm(0xFFFFFFFC);
+        mv.visitInsn(Opcodes.IAND);
+
         compileDelaySlot(context, mv);
         context.visitCall(getAddress() + 8, context.getRdRegisterIndex());
     }
@@ -248,16 +260,15 @@ public class CodeInstruction {
             	//    0x00000014    nop
             	//    0x00000018    something
             	//
-                if (branchingToCodeInstruction.getInsn() == Instructions.NOP) {
-                	CodeInstruction beforeBranchingToCodeInstruction = context.getCodeBlock().getCodeInstruction(getBranchingTo() - 4);
-                	if (beforeBranchingToCodeInstruction != null && beforeBranchingToCodeInstruction.hasFlags(Instruction.FLAG_HAS_DELAY_SLOT)) {
-    	            	if (log.isDebugEnabled()) {
-    	            		log.debug(String.format("0x%08X: branching to a NOP in a delay slot, correcting to the next instruction", getAddress()));
-    	            	}
-    	            	branchingToCodeInstruction = context.getCodeBlock().getCodeInstruction(getBranchingTo() + 4);
-                	}
-                }
-
+        		if (branchingToCodeInstruction.getInsn() == Instructions.NOP) {
+        			CodeInstruction beforeBranchingToCodeInstruction = context.getCodeBlock().getCodeInstruction(getBranchingTo() - 4);
+        			if (beforeBranchingToCodeInstruction != null && beforeBranchingToCodeInstruction.hasFlags(Instruction.FLAG_HAS_DELAY_SLOT)) {
+		            	if (log.isDebugEnabled()) {
+		            		log.debug(String.format("0x%08X: branching to a NOP in a delay slot, correcting to the next instruction", getAddress()));
+		            	}
+		            	branchingToCodeInstruction = context.getCodeBlock().getCodeInstruction(getBranchingTo() + 4);
+	        		}
+            	}
                 context.visitJump(branchingOpcode, branchingToCodeInstruction);
             } else {
                 context.visitJump(branchingOpcode, getBranchingTo());
@@ -287,7 +298,7 @@ public class CodeInstruction {
         if (delaySlotCodeInstruction.hasFlags(Instruction.FLAG_HAS_DELAY_SLOT)) {
         	// Issue a warning when compiling an instruction having a delay slot inside a delay slot.
         	// See http://code.google.com/p/pcsx2/source/detail?r=5541
-		String lineSeparator = System.getProperty("line.separator");
+        	String lineSeparator = System.getProperty("line.separator");
         	log.warn(String.format("Instruction in a delay slot having a delay slot:%s%s%s%s", lineSeparator, this, lineSeparator, delaySlotCodeInstruction));
         }
 
@@ -449,13 +460,13 @@ public class CodeInstruction {
         	//    nop
         	//    jr  $ra
         	//    nop
-		String lineSeparator = System.getProperty("line.separator");
+        	String lineSeparator = System.getProperty("line.separator");
         	log.warn(String.format("Instruction in a delay slot having a delay slot:%s%s%s%s", lineSeparator, this, lineSeparator, delaySlotCodeInstruction));
         } else {
         	compileDelaySlot(context, mv, delaySlotCodeInstruction);
         }
 
-    	if (branchingOpcode == Opcodes.GOTO && getBranchingTo() == getAddress()) {
+    	if (branchingOpcode == Opcodes.GOTO && getBranchingTo() == getAddress() && delaySlotCodeInstruction.getOpcode() == NOP()) {
     		context.visitLogInfo(mv, String.format("Pausing emulator - branch to self (death loop) at 0x%08X", getAddress()));
     		context.visitPauseEmuWithStatus(mv, Emulator.EMU_STATUS_JUMPSELF);
     	}
@@ -710,29 +721,31 @@ public class CodeInstruction {
 		return getInsn().disasm(address, opcode);
 	}
 
+	public boolean useMMIO() {
+		return useMMIO;
+	}
+
+	public void setUseMMIO(boolean useMMIO) {
+		this.useMMIO = useMMIO;
+	}
+
 	@Override
 	public String toString() {
-    	StringBuilder result = new StringBuilder();
-
-    	String branchingFlag;
+    	char branchingFlag;
     	if (isBranching()) {
     		if (hasFlags(Instruction.FLAG_STARTS_NEW_BLOCK)) {
-    			branchingFlag = "<"; // branching "out" of current block
+    			branchingFlag = '<'; // branching "out" of the current block
     		} else if (getBranchingTo() <= getAddress()) {
-    			branchingFlag = "^"; // branching "up"
+    			branchingFlag = '^'; // branching "up"
     		} else {
-    			branchingFlag = "v"; // branching "down"
+    			branchingFlag = 'v'; // branching "down"
     		}
     	} else {
-    		branchingFlag = " "; // no branching
+    		branchingFlag = ' '; // no branching
     	}
-    	result.append(branchingFlag);
-    	result.append(isBranchTarget() ? ">" : " ");
-    	result.append(" 0x");
-    	result.append(Integer.toHexString(getAddress()).toUpperCase());
-    	result.append(" - ");
-    	result.append(disasm(getAddress(), getOpcode()));
 
-    	return result.toString();
+    	char branchTargetFlag = isBranchTarget() ? '>' : ' ';
+
+    	return String.format("%c%c 0x%08X: [0x%08X] - %s", branchingFlag, branchTargetFlag, getAddress(), getOpcode(), disasm(getAddress(), getOpcode()));
     }
 }

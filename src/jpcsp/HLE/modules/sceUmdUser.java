@@ -22,6 +22,11 @@ import static jpcsp.HLE.kernel.types.SceKernelErrors.ERROR_KERNEL_WAIT_TIMEOUT;
 import static jpcsp.HLE.kernel.types.SceKernelErrors.ERROR_UMD_NOT_READY;
 import static jpcsp.HLE.kernel.types.SceKernelThreadInfo.JPCSP_WAIT_UMD;
 import jpcsp.Emulator;
+import jpcsp.Memory;
+import jpcsp.NIDMapper;
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
 import jpcsp.HLE.HLEUnimplemented;
@@ -35,12 +40,14 @@ import java.util.ListIterator;
 import jpcsp.HLE.Modules;
 import jpcsp.HLE.kernel.types.IAction;
 import jpcsp.HLE.kernel.types.IWaitStateChecker;
-import jpcsp.HLE.kernel.types.SceKernelCallbackInfo;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.SceKernelThreadInfo;
 import jpcsp.HLE.kernel.types.ThreadWaitInfo;
 import jpcsp.HLE.kernel.types.pspUmdInfo;
+import jpcsp.HLE.modules.SysMemUserForUser.SysMemInfo;
 import jpcsp.filesystems.umdiso.UmdIsoReader;
+import jpcsp.scheduler.Scheduler;
+import jpcsp.util.Utilities;
 
 import org.apache.log4j.Logger;
 
@@ -80,9 +87,22 @@ public class sceUmdUser extends HLEModule {
     }
 
     private static class DelayedUmdSwitch implements IAction {
+    	private UmdIsoReader iso;
+
+    	public DelayedUmdSwitch(UmdIsoReader iso) {
+			this.iso = iso;
+		}
+
 		@Override
 		public void execute() {
-			Modules.sceUmdUserModule.hleDelayedUmdSwitch();
+			Modules.sceUmdUserModule.hleDelayedUmdSwitch(iso);
+		}
+    }
+
+    private static class DelayedUmdRemoved implements IAction {
+		@Override
+		public void execute() {
+			Modules.sceUmdUserModule.hleDelayedUmdSwitch(null);
 		}
     }
 
@@ -104,7 +124,11 @@ public class sceUmdUser extends HLEModule {
         this.iso = iso;
         setUmdActivated();
     }
-    
+
+    public UmdIsoReader getIsoReader() {
+    	return iso;
+    }
+
     public void setUmdErrorStat(int stat) {
         umdErrorStat = stat;
     }
@@ -245,17 +269,30 @@ public class sceUmdUser extends HLEModule {
 		Emulator.getMainGUI().onUmdChange();
 	}
 
-	public void hleUmdSwitch() {
-		// First notify that the UMD has been removed
-		int notifyArg = getNotificationArg(false);
-    	Modules.ThreadManForUserModule.hleKernelNotifyCallback(SceKernelThreadInfo.THREAD_CALLBACK_UMD, notifyArg);
+	public void hleUmdSwitch(UmdIsoReader newIso) {
+		Scheduler scheduler = Scheduler.getInstance();
 
-    	// After 100ms delay, notify that a new UMD has been inserted
-    	long schedule = Emulator.getClock().microTime() + 100 * 1000;
-    	Emulator.getScheduler().addAction(schedule, new DelayedUmdSwitch());
+		long delayedUmdSwitchSchedule = Scheduler.getNow();
+		if (iso != null) {
+			// First notify that the UMD has been removed
+			scheduler.addAction(new DelayedUmdRemoved());
+
+	    	// After 100ms delay, notify that a new UMD has been inserted
+	    	delayedUmdSwitchSchedule += 100 * 1000;
+		}
+
+		scheduler.addAction(delayedUmdSwitchSchedule, new DelayedUmdSwitch(newIso));
 	}
 
-	protected void hleDelayedUmdSwitch() {
+	protected void hleDelayedUmdRemoved() {
+		int notifyArg = getNotificationArg(false);
+    	Modules.ThreadManForUserModule.hleKernelNotifyCallback(SceKernelThreadInfo.THREAD_CALLBACK_UMD, notifyArg);
+	}
+
+	protected void hleDelayedUmdSwitch(UmdIsoReader iso) {
+		Modules.IoFileMgrForUserModule.setIsoReader(iso);
+		setIsoReader(iso);
+
 		int notifyArg = getNotificationArg() | PSP_UMD_CHANGED;
     	Modules.ThreadManForUserModule.hleKernelNotifyCallback(SceKernelThreadInfo.THREAD_CALLBACK_UMD, notifyArg);
 	}
@@ -276,6 +313,24 @@ public class sceUmdUser extends HLEModule {
     	Modules.ThreadManForUserModule.hleKernelNotifyCallback(SceKernelThreadInfo.THREAD_CALLBACK_UMD, notifyArg);
 
     	checkWaitingThreads();
+
+    	// int arg[] = { 1 };
+    	// sceIoAssign(drive, "umd0:", "isofs0:", 1, &arg, 4);
+    	int sceIoAssign = NIDMapper.getInstance().getAddressByName("sceIoAssign");
+    	if (sceIoAssign != 0) {
+    		SysMemInfo memInfo = Modules.SysMemUserForUserModule.malloc(SysMemUserForUser.KERNEL_PARTITION_ID, "sceUmdActivate", SysMemUserForUser.PSP_SMEM_Low, 32, 0);
+    		int argAddr = memInfo.addr;
+    		int umdAddr = memInfo.addr + 4;
+    		int isofsAddr = memInfo.addr + 10;
+
+    		Memory mem = Memory.getInstance();
+    		Utilities.writeStringZ(mem, umdAddr, "umd0:");
+    		Utilities.writeStringZ(mem, isofsAddr, "isofs0:");
+    		mem.write32(argAddr, 1);
+
+			SceKernelThreadInfo thread = Modules.ThreadManForUserModule.getCurrentThread();
+			Modules.ThreadManForUserModule.executeCallback(thread, sceIoAssign, null, false, drive.getAddress(), umdAddr, isofsAddr, 1, argAddr, 4);
+    	}
 
     	return 0;
     }
@@ -379,8 +434,7 @@ public class sceUmdUser extends HLEModule {
 
     @HLEFunction(nid = 0xBD2BDE07, version = 150)
     public int sceUmdUnRegisterUMDCallBack(int uid) {
-        SceKernelCallbackInfo info = Modules.ThreadManForUserModule.hleKernelUnRegisterCallback(SceKernelThreadInfo.THREAD_CALLBACK_UMD, uid);
-        if (info == null) {
+        if (!Modules.ThreadManForUserModule.hleKernelUnRegisterCallback(SceKernelThreadInfo.THREAD_CALLBACK_UMD, uid)) {
         	return -1;
         }
 
@@ -414,6 +468,133 @@ public class sceUmdUser extends HLEModule {
     @HLEUnimplemented
     @HLEFunction(nid = 0xB103FA38, version = 660)
     public int sceUmdUseUMDInMsUsbWlan() {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x816E656B, version = 660)
+    public void sceUmdSetSuspendResumeMode(int mode) {
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x899B5C41, version = 660)
+    public int sceUmdGetSuspendResumeMode() {
+    	// Has no parameters
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xD45D1FE6, version = 150)
+    public int sceUmdGetDriveStatus() {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xB7BF4C31, version = 660)
+    public int sceUmdGetDriveStatus_660() {
+        return sceUmdGetDriveStatus();
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x230666E3, version = 150)
+    public int sceUmdSetDriveStatus(int state) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x982272FE, version = 660)
+    public int sceUmdSetDriveStatus_660(int state) {
+        return sceUmdSetDriveStatus(state);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xAE53DC2D, version = 150)
+    public int sceUmdClearDriveStatus(int state) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x6EDF57F1, version = 660)
+    public int sceUmdClearDriveStatus_660(int state) {
+        return sceUmdClearDriveStatus(state);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x040A7090, version = 660)
+    public int sceUmd_040A7090(int errorCode) {
+    	// Error code mapping?
+        return errorCode;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x7850F057, version = 150)
+    public int sceUmdRegisterGetUMDInfoCallBack(TPointer callback, @BufferInfo(lengthInfo=LengthInfo.variableLength, usage=Usage.out) TPointer discInfoAddr) {
+    	return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x48EF868C, version = 660)
+    public int sceUmdRegisterGetUMDInfoCallBack_660(TPointer callback, @BufferInfo(lengthInfo=LengthInfo.variableLength, usage=Usage.out) TPointer discInfoAddr) {
+    	return sceUmdRegisterGetUMDInfoCallBack(callback, discInfoAddr);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x63517CBA, version = 150)
+    public int sceUmd_63517CBA(TPointer callback, int callbackArg) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x086DDC0D, version = 150)
+    public int sceUmdRegisterActivateCallBack(TPointer callback, int callbackArg) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x9B0F59CE, version = 660)
+    public int sceUmdRegisterActivateCallBack_660(TPointer callback, int callbackArg) {
+        return sceUmdRegisterActivateCallBack(callback, callbackArg);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x2D81508D, version = 150)
+    public int sceUmdRegisterDeactivateCallBack(TPointer callback, int callbackArg) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xD1C80E51, version = 660)
+    public int sceUmdRegisterDeactivateCallBack_660(TPointer callback, int callbackArg) {
+        return sceUmdRegisterDeactivateCallBack(callback, callbackArg);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x4832ABF3, version = 150)
+    public int sceUmdRegisterReplaceCallBack(TPointer callback) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x3748C4DB, version = 660)
+    public int sceUmdRegisterReplaceCallBack_660(TPointer callback) {
+        return sceUmdRegisterReplaceCallBack(callback);
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0x76D356F9, version = 660)
+    public int sceUmd_76D356F9(TPointer callback) {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xEB56097E, version = 150)
+    public int sceUmdGetDetectUMDCallBackId() {
+        return 0;
+    }
+
+    @HLEUnimplemented
+    @HLEFunction(nid = 0xA55109DD, version = 660)
+    public int sceUmdGetDetectUMDCallBackId_660() {
         return 0;
     }
 }

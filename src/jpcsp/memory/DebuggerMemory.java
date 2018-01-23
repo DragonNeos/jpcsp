@@ -29,9 +29,11 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 
+import jpcsp.Allegrex.compiler.RuntimeContext;
 import jpcsp.Debugger.MemoryBreakpoints.MemoryBreakpoint;
 import jpcsp.Emulator;
 import jpcsp.Memory;
+import jpcsp.Processor;
 import jpcsp.util.Utilities;
 
 public class DebuggerMemory extends Memory {
@@ -239,19 +241,22 @@ public class DebuggerMemory extends Memory {
         log.info(String.format("%d memory breakpoint(s) imported", memoryBreakpoints.size()));
     }
 
+    public static boolean isInstalled() {
+    	return Memory.getInstance() instanceof DebuggerMemory;
+    }
+
     public static void install() {
-        log.info("Using DebuggerMemory");
-        Memory mem = Memory.getInstance();
-        if (!(mem instanceof DebuggerMemory)) {
-            DebuggerMemory debuggerMemory = new DebuggerMemory(mem);
+        if (!isInstalled()) {
+            log.info("Using DebuggerMemory");
+            DebuggerMemory debuggerMemory = new DebuggerMemory(Memory.getInstance());
             Memory.setInstance(debuggerMemory);
+            RuntimeContext.updateMemory();
         }
     }
 
     public static void deinstall() {
-        Memory mem = Memory.getInstance();
-        if (mem instanceof DebuggerMemory) {
-            DebuggerMemory debuggerMemory = (DebuggerMemory) mem;
+        if (isInstalled()) {
+            DebuggerMemory debuggerMemory = (DebuggerMemory) Memory.getInstance();
             Memory.setInstance(debuggerMemory.mem);
         }
     }
@@ -326,7 +331,12 @@ public class DebuggerMemory extends Memory {
 
     protected String getMemoryReadMessage(int address, int width) {
         StringBuilder message = new StringBuilder();
-        message.append(String.format("0x%08X - ", Emulator.getProcessor().cpu.pc));
+
+        Processor processor = Emulator.getProcessor();
+        if (processor != null) {
+        	message.append(String.format("0x%08X - ", processor.cpu.pc));
+        }
+
         if (width == 8 || width == 16 || width == 32) {
             message.append(String.format("read%d(0x%08X)=0x", width, address));
             if (width == 8) {
@@ -335,7 +345,8 @@ public class DebuggerMemory extends Memory {
                 message.append(String.format("%04X", mem.read16(address)));
             } else if (width == 32) {
                 int value = mem.read32(address);
-                message.append(String.format("%08X (%f)", value, Float.intBitsToFloat(value)));
+                //message.append(String.format("%08X (%f)", value, Float.intBitsToFloat(value)));
+                message.append(String.format("%08X", value));
             }
         } else {
             int length = width / 8;
@@ -361,14 +372,20 @@ public class DebuggerMemory extends Memory {
 
     protected String getMemoryWriteMessage(int address, int value, int width) {
         StringBuilder message = new StringBuilder();
-        message.append(String.format("0x%08X - ", Emulator.getProcessor().cpu.pc));
+
+        Processor processor = Emulator.getProcessor();
+        if (processor != null) {
+        	message.append(String.format("0x%08X - ", processor.cpu.pc));
+        }
+
         message.append(String.format("write%d(0x%08X, 0x", width, address));
         if (width == 8) {
             message.append(String.format("%02X", value & 0xFF));
         } else if (width == 16) {
             message.append(String.format("%04X", value & 0xFFFF));
         } else if (width == 32) {
-            message.append(String.format("%08X (%f)", value, Float.intBitsToFloat(value)));
+            //message.append(String.format("%08X (%f)", value, Float.intBitsToFloat(value)));
+            message.append(String.format("%08X", value));
         }
         message.append(")");
 
@@ -421,10 +438,30 @@ public class DebuggerMemory extends Memory {
 
     @Override
     protected void memcpy(int destination, int source, int length, boolean checkOverlap) {
-        // Perform memcpy using read8/write8 to check memory access
-        for (int i = 0; i < length; i++) {
-            write8(destination + i, (byte) mem.read8(source + i));
-        }
+    	destination = normalizeAddress(destination);
+		source = normalizeAddress(source);
+
+		// Overlapping address ranges must be correctly handled:
+		//   If source >= destination:
+		//                 [---source---]
+		//       [---destination---]
+		//      => Copy from the head
+		//   If source < destination:
+		//       [---source---]
+		//                 [---destination---]
+		//      => Copy from the tail
+		//
+    	if (!checkOverlap || source >= destination || !areOverlapping(destination, source, length)) {
+    		// Perform memcpy using read8/write8 to check memory access
+            for (int i = 0; i < length; i++) {
+                write8(destination + i, (byte) read8(source + i));
+            }
+    	} else {
+    		// Perform memcpy using read8/write8 to check memory access
+			for (int i = length - 1; i >= 0; i--) {
+				write8(destination + i, (byte) read8(source + i));
+			}
+    	}
     }
 
     @Override
@@ -470,4 +507,12 @@ public class DebuggerMemory extends Memory {
         memoryWrite(address, data, 32, traceMemoryWrite32);
         mem.write32(address, data);
     }
+
+	@Override
+	public void setIgnoreInvalidMemoryAccess(boolean ignoreInvalidMemoryAccess) {
+		super.setIgnoreInvalidMemoryAccess(ignoreInvalidMemoryAccess);
+		if (mem != null) {
+			mem.setIgnoreInvalidMemoryAccess(ignoreInvalidMemoryAccess);
+		}
+	}
 }

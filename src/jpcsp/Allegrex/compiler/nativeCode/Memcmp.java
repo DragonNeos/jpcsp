@@ -18,6 +18,7 @@ package jpcsp.Allegrex.compiler.nativeCode;
 
 import jpcsp.memory.IMemoryReader;
 import jpcsp.memory.MemoryReader;
+import jpcsp.util.Utilities;
 
 /**
  * @author gid15
@@ -29,6 +30,9 @@ public class Memcmp extends AbstractNativeCodeSequence {
 		int src2Addr = getGprA1();
 		int n = getGprA2();
 
+		if (log.isTraceEnabled()) {
+			log.trace(String.format("memcmp src1=%s, src2=%s, n=0x%X", Utilities.getMemoryDump(src1Addr, n), Utilities.getMemoryDump(src2Addr, n), n));
+		}
 		IMemoryReader memoryReader1 = MemoryReader.getMemoryReader(src1Addr, n, 1);
 		IMemoryReader memoryReader2 = MemoryReader.getMemoryReader(src2Addr, n, 1);
 		for (int i = 0; i < n; i++) {
@@ -36,6 +40,25 @@ public class Memcmp extends AbstractNativeCodeSequence {
 			int c2 = memoryReader2.readNext();
 			if (c1 != c2) {
 				setGprV0(c1 - c2);
+				return;
+			}
+		}
+
+		setGprV0(0);
+	}
+
+	static public void callOneMinusOne() {
+		int src1Addr = getGprA0();
+		int src2Addr = getGprA1();
+		int n = getGprA2();
+
+		IMemoryReader memoryReader1 = MemoryReader.getMemoryReader(src1Addr, n, 1);
+		IMemoryReader memoryReader2 = MemoryReader.getMemoryReader(src2Addr, n, 1);
+		for (int i = 0; i < n; i++) {
+			int c1 = memoryReader1.readNext();
+			int c2 = memoryReader2.readNext();
+			if (c1 != c2) {
+				setGprV0(c1 < c2 ? -1 : 1);
 				return;
 			}
 		}

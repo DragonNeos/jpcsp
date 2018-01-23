@@ -24,6 +24,10 @@ import java.util.TimeZone;
 
 import jpcsp.Clock.TimeNanos;
 import jpcsp.Emulator;
+import jpcsp.HLE.BufferInfo;
+import jpcsp.HLE.BufferInfo.LengthInfo;
+import jpcsp.HLE.BufferInfo.Usage;
+import jpcsp.HLE.CanBeNull;
 import jpcsp.HLE.HLEFunction;
 import jpcsp.HLE.HLEModule;
 import jpcsp.HLE.HLEUnimplemented;
@@ -54,10 +58,12 @@ public class sceRtc extends HLEModule {
     final static int PSP_TIME_SECONDS_IN_MONTH = 2629743;
     final static int PSP_TIME_SECONDS_IN_YEAR = 31556926;
 
+    // Number of milliseconds between 1900-01-01 (reference date on a PSP)
+    // and 1970-01-01 (reference date on Java)
     private long rtcMagicOffset = 62135596800000000L;
     protected static SimpleDateFormat rfc3339 = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ");
 
-    protected long hleGetCurrentTick() {
+    public long hleGetCurrentTick() {
     	TimeNanos timeNanos = Emulator.getClock().currentTimeNanos();
     	return (timeNanos.micros + timeNanos.millis * 1000) + timeNanos.seconds * 1000000L + rtcMagicOffset;
     }
@@ -138,7 +144,7 @@ public class sceRtc extends HLEModule {
     }
 
     @HLEFunction(nid = 0x4CFA57B0, version = 150)
-    public int sceRtcGetCurrentClock(TPointer addr, int tz) {
+    public int sceRtcGetCurrentClock(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=16, usage=Usage.out) TPointer addr, int tz) {
         ScePspDateTime pspTime = new ScePspDateTime(tz);
         pspTime.write(addr);
 
@@ -151,6 +157,11 @@ public class sceRtc extends HLEModule {
         pspTime.write(addr);
 
         return 0;
+    }
+
+    @HLEFunction(nid = 0x9012B140, version = 660)
+    public int sceRtcGetCurrentClockLocalTime_660(TPointer addr) {
+    	return sceRtcGetCurrentClockLocalTime(addr);
     }
 
     @HLEFunction(nid = 0x34885E0D, version = 150)
@@ -283,6 +294,11 @@ public class sceRtc extends HLEModule {
         return 0;
     }
 
+    @HLEFunction(nid = 0x74772CCC, version = 660)
+    public int sceRtcSetDosTime_660(TPointer dateAddr, int time) {
+    	return sceRtcSetDosTime(dateAddr, time);
+    }
+
     @HLEFunction(nid = 0x36075567, version = 150)
     public int sceRtcGetDosTime(ScePspDateTime dateTime, TPointer32 timeAddr) {
         Calendar cal = Calendar.getInstance();
@@ -296,6 +312,11 @@ public class sceRtc extends HLEModule {
         timeAddr.setValue(dostime);
         
         return 0;
+    }
+
+    @HLEFunction(nid = 0xA4A5BF1B, version = 660)
+    public int sceRtcGetDosTime_660(ScePspDateTime dateTime, TPointer32 timeAddr) {
+    	return sceRtcGetDosTime(dateTime, timeAddr);
     }
 
     @HLEFunction(nid = 0x7ACE4C04, version = 150)
@@ -323,7 +344,7 @@ public class sceRtc extends HLEModule {
 
     /** Set a pspTime struct based on ticks. */
     @HLEFunction(nid = 0x7ED29E40, version = 150)
-    public int sceRtcSetTick(TPointer timeAddr, TPointer64 ticksAddr) {
+    public int sceRtcSetTick(@BufferInfo(lengthInfo=LengthInfo.fixedLength, length=16, usage=Usage.out) TPointer timeAddr, @BufferInfo(usage=Usage.in) TPointer64 ticksAddr) {
         long ticks = ticksAddr.getValue() - rtcMagicOffset;
         ScePspDateTime time = ScePspDateTime.fromMicros(ticks);
         time.write(timeAddr);
@@ -462,7 +483,11 @@ public class sceRtc extends HLEModule {
 
     @HLEUnimplemented
     @HLEFunction(nid = 0x7D1FBED3, version = 150)
-    public int sceRtcSetAlarmTick(TPointer64 srcPtr) {
+    public int sceRtcSetAlarmTick(@CanBeNull TPointer64 srcPtr) {
+    	if (log.isDebugEnabled() && srcPtr.isNotNull()) {
+    		log.debug(String.format("sceRtcSetAlarmTick src=0x%X", srcPtr.getValue()));
+    	}
+
     	return 0;
     }
 
@@ -512,4 +537,65 @@ public class sceRtc extends HLEModule {
 	public int sceRtcRegisterCallback(int callbackId) {
 		return 0;
 	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0x6A676D2D, version = 271)
+	public int sceRtcUnregisterCallback(int callbackId) {
+		return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xF5FCC995 , version = 150)
+	public int sceRtcGetCurrentNetworkTick(TPointer64 networkTick) {
+		networkTick.setValue(hleGetCurrentTick());
+
+        if (log.isDebugEnabled()) {
+        	log.debug(String.format("sceRtcGetCurrentNetworkTick returning %d", networkTick.getValue()));
+        }
+
+        return 0;
+	}
+
+	@HLEUnimplemented
+	@HLEFunction(nid = 0xC2DDBEB5, version = 150)
+	public int sceRtcGetAlarmTick(TPointer64 alarmTick) {
+		alarmTick.setValue(0L);
+
+		return 0;
+	}
+
+	@HLEUnimplemented
+    @HLEFunction(nid = 0xE09880CF, version = 660)
+    public int sceRtcSetAlarmTick_660(@CanBeNull TPointer64 srcPtr) {
+		return sceRtcSetAlarmTick(srcPtr);
+    }
+
+	@HLEUnimplemented
+    @HLEFunction(nid = 0xCEEF238F, version = 150)
+    public int sceRtcGetCurrentSecureTick(TPointer64 currentTick) {
+		return sceRtcGetCurrentTick(currentTick);
+    }
+
+	@HLEUnimplemented
+    @HLEFunction(nid = 0x759937C5, version = 150)
+    public int sceRtcSetConf(int unknown1, int unknown2, int unknown3, int unknown4) {
+		return 0;
+    }
+
+	@HLEUnimplemented
+    @HLEFunction(nid = 0xDFF30673, version = 660)
+    public int sceRtcSetConf_660(int unknown1, int unknown2, int unknown3, int unknown4) {
+		return sceRtcSetConf(unknown1, unknown2, unknown3, unknown4);
+    }
+
+	@HLEUnimplemented
+    @HLEFunction(nid = 0x508BA64B, version = 150)
+    public int sceRtc_508BA64B(@CanBeNull @BufferInfo(usage=Usage.in) TPointer64 unknown) {
+		return 0;
+    }
+
+    @HLEFunction(nid = 0xE7B3ABF4, version = 660)
+    public int sceRtcSetTick_660(TPointer timeAddr, TPointer64 ticksAddr) {
+		return sceRtcSetTick(timeAddr, ticksAddr);
+    }
 }

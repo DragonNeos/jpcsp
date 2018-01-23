@@ -22,7 +22,9 @@ import java.util.List;
 import java.util.Vector;
 
 import jpcsp.Emulator;
+import jpcsp.Allegrex.compiler.RuntimeContextLLE;
 import jpcsp.HLE.Modules;
+import jpcsp.HLE.TPointer;
 import jpcsp.HLE.kernel.types.IAction;
 import jpcsp.HLE.kernel.types.SceKernelErrors;
 import jpcsp.HLE.kernel.types.interrupts.AbstractAllegrexInterruptHandler;
@@ -32,13 +34,11 @@ import jpcsp.HLE.kernel.types.interrupts.InterruptState;
 import jpcsp.HLE.kernel.types.interrupts.IntrHandler;
 import jpcsp.HLE.kernel.types.interrupts.SubIntrHandler;
 import jpcsp.HLE.kernel.types.interrupts.VBlankInterruptHandler;
-import jpcsp.hardware.Interrupts;
 import jpcsp.scheduler.Scheduler;
 
 import org.apache.log4j.Logger;
 
 public class IntrManager {
-
     protected static Logger log = Modules.getLogger("ThreadManForUser");
 
 	public static final int PSP_GPIO_INTR      =  4;
@@ -154,6 +154,11 @@ public class IntrManager {
 	}
 
 	private void installDefaultInterrupts() {
+		// No default interrupts when running LLE
+		if (RuntimeContextLLE.isLLEActive()) {
+			return;
+		}
+
 		Scheduler scheduler = Emulator.getScheduler();
 
 		// install VBLANK interrupt every 1/60 second
@@ -162,13 +167,13 @@ public class IntrManager {
 
 	public void addDeferredInterrupt(AbstractInterruptHandler interruptHandler) {
 		if (log.isDebugEnabled()) {
-			log.debug(String.format("addDeferredInterrupt insideInterrupt=%b, interruptsEnabled=%b", isInsideInterrupt(), Interrupts.isInterruptsEnabled()));
+			log.debug(String.format("addDeferredInterrupt insideInterrupt=%b, interruptsEnabled=%b", isInsideInterrupt(), Emulator.getProcessor().isInterruptsEnabled()));
 		}
 		deferredInterrupts.add(interruptHandler);
 	}
 
 	public boolean canExecuteInterruptNow() {
-		return !isInsideInterrupt() && Interrupts.isInterruptsEnabled();
+		return !isInsideInterrupt() && Emulator.getProcessor().isInterruptsEnabled();
 	}
 
 	public void onInterruptsEnabled() {
@@ -333,11 +338,7 @@ public class IntrManager {
 		return vblankInterruptHandler.removeVBlankActionOnce(action);
 	}
 
-	public int sceKernelRegisterSubIntrHandler(int intrNumber, int subIntrNumber, int handlerAddress, int handlerArgument) {
-		if (log.isDebugEnabled()) {
-			log.debug(String.format("sceKernelRegisterSubIntrHandler(%d, %d, 0x%08X, 0x%08X)", intrNumber, subIntrNumber, handlerAddress, handlerArgument));
-		}
-
+	public int sceKernelRegisterSubIntrHandler(int intrNumber, int subIntrNumber, TPointer handlerAddress, int handlerArgument) {
 		if (intrNumber < 0 || intrNumber >= IntrManager.PSP_NUMBER_INTERRUPTS || subIntrNumber < 0) {
 			return SceKernelErrors.ERROR_KERNEL_INVALID_INTR_NUMBER;
 		}
@@ -350,7 +351,7 @@ public class IntrManager {
 			return SceKernelErrors.ERROR_KERNEL_SUBINTR_ALREADY_REGISTERED;
 		}
 
-		SubIntrHandler subIntrHandler = new SubIntrHandler(handlerAddress, subIntrNumber, handlerArgument);
+		SubIntrHandler subIntrHandler = new SubIntrHandler(handlerAddress.getAddress(), subIntrNumber, handlerArgument);
 		subIntrHandler.setEnabled(false);
 		intrHandlers[intrNumber].addSubIntrHandler(subIntrNumber, subIntrHandler);
 

@@ -96,6 +96,7 @@ public class SceKernelErrors {
     public static final int ERROR_NOSPC                                         = 0x8000021C;
     public static final int ERROR_DFUNC                                         = 0x800002FF;
 
+    public final static int ERROR_ERRNO_BASE                                    = 0x80010000;
     public final static int ERROR_ERRNO_OPERATION_NOT_PERMITTED                 = 0x80010001;
     public final static int ERROR_ERRNO_FILE_NOT_FOUND                          = 0x80010002;
     public final static int ERROR_ERRNO_FILE_OPEN_ERROR                         = 0x80010003;
@@ -148,6 +149,7 @@ public class SceKernelErrors {
     public final static int ERROR_KERNEL_INTERRUPTS_ALREADY_DISABLED            = 0x80020066;
     public final static int ERROR_KERNEL_SUBINTR_ALREADY_REGISTERED             = 0x80020067;
     public final static int ERROR_KERNEL_SUBINTR_NOT_REGISTERED                 = 0x80020068;
+    public final static int ERROR_KERNEL_UNKNOWN_UID_TYPE                       = 0x800200c9;
     public final static int ERROR_KERNEL_UNKNOWN_UID                            = 0x800200cb;
     public final static int ERROR_KERNEL_UNMATCH_TYPE_UID                       = 0x800200cc;
     public final static int ERROR_KERNEL_NOT_EXIST_ID                           = 0x800200cd;
@@ -292,6 +294,8 @@ public class SceKernelErrors {
     public final static int ERROR_KERNEL_NOT_CACHE_ALIGNED                      = 0x8002044c;
     public final static int ERROR_KERNEL_MAX_ERROR                              = 0x8002044d;
 
+    public final static int ERROR_REGISTRY_NOT_FOUND                            = 0x80082718;
+
     public static final int ERROR_UTILITY_INVALID_STATUS                        = 0x80110001;
     public static final int ERROR_UTILITY_INVALID_PARAM_ADDR                    = 0x80110002;
     public static final int ERROR_UTILITY_IS_UNKNOWN                            = 0x80110003;
@@ -403,6 +407,8 @@ public class SceKernelErrors {
 
     public final static int ERROR_NET_NO_SPACE                                  = 0x80410001;
 
+    public final static int ERROR_NET_NO_EVENT                                  = 0x80410184;
+
     public final static int ERROR_NET_RESOLVER_BAD_ID                           = 0x80410408;
     public final static int ERROR_NET_RESOLVER_ALREADY_STOPPED                  = 0x8041040a;
     public final static int ERROR_NET_RESOLVER_INVALID_HOST                     = 0x80410414;
@@ -423,11 +429,13 @@ public class SceKernelErrors {
     public final static int ERROR_NET_ADHOC_MATCHING_ALREADY_INITIALIZED        = 0x80410812;
     public final static int ERROR_NET_ADHOC_MATCHING_NOT_INITIALIZED            = 0x80410813;
 
+    public final static int ERROR_NET_ADHOCCTL_INVALID_PARAMETER                = 0x80410b04;
     public final static int ERROR_NET_ADHOCCTL_ALREADY_INITIALIZED              = 0x80410b07;
     public final static int ERROR_NET_ADHOCCTL_NOT_INITIALIZED                  = 0x80410b08;
     public final static int ERROR_NET_ADHOCCTL_TOO_MANY_HANDLERS                = 0x80410b12;
 
     public final static int ERROR_WLAN_BAD_PARAMS                               = 0x80410d13;
+    public final static int ERROR_WLAN_NOT_IN_GAMEMODE                          = 0x80410d14;
 
     public final static int ERROR_SAS_INVALID_GRAIN                             = 0x80420001;
     public final static int ERROR_SAS_INVALID_MAX_VOICES                        = 0x80420002;
@@ -449,14 +457,19 @@ public class SceKernelErrors {
     public final static int ERROR_SAS_INVALID_FX_DELAY                          = 0x80420022;
     public final static int ERROR_SAS_INVALID_FX_VOLUME_VAL                     = 0x80420023;
     public final static int ERROR_SAS_BUSY                                      = 0x80420030;
+    public final static int ERROR_SAS_CANNOT_CONCATENATE_ATRA3                  = 0x80420042;
     public final static int ERROR_SAS_NOT_INIT                                  = 0x80420100;
     public final static int ERROR_SAS_ALREADY_INIT                              = 0x80420101;
 
     public final static int ERROR_HTTP_NOT_INIT                                 = 0x80431001;
     public final static int ERROR_HTTP_ALREADY_INIT                             = 0x80431020;
+    public final static int ERROR_HTTP_NOT_FOUND                                = 0x80431025;
+    public final static int ERROR_HTTP_NO_CONTENT_LENGTH                        = 0x80431071;
     public final static int ERROR_HTTP_NO_MEMORY                                = 0x80431077;
     public final static int ERROR_HTTP_SYSTEM_COOKIE_NOT_LOADED                 = 0x80431078;
     public final static int ERROR_HTTP_INVALID_PARAMETER                        = 0x804311FE;
+
+    public final static int ERROR_PARSE_HTTP_NOT_FOUND                          = 0x80432025;
 
     public final static int ERROR_SSL_NOT_INIT                                  = 0x80435001;
     public final static int ERROR_SSL_ALREADY_INIT                              = 0x80435020;
@@ -474,6 +487,7 @@ public class SceKernelErrors {
     public final static int ERROR_WAVE_INVALID_CHANNEL                          = 0x80440010;
     public final static int ERROR_WAVE_INVALID_SAMPLE_COUNT                     = 0x80440011;
 
+    public final static int ERROR_FONT_OUT_OF_MEMORY                            = 0x80460001;
     public final static int ERROR_FONT_INVALID_LIBID                            = 0x80460002;
     public final static int ERROR_FONT_INVALID_PARAMETER                        = 0x80460003;
     public final static int ERROR_FONT_FILE_NOT_FOUND                           = 0x80460005;
@@ -484,6 +498,7 @@ public class SceKernelErrors {
 
     public final static int ERROR_NPAUTH_NOT_INIT                               = 0x80550302;
     public final static int ERROR_NPSERVICE_NOT_INIT                            = 0x80550502;
+    public final static int ERROR_NP_MANAGER_INVALID_ARGUMENT                   = 0x80550503;
 
     public final static int ERROR_NPDRM_INVALID_FILE                            = 0x80550901;
     public final static int ERROR_NPDRM_INTERNAL_ERROR                          = 0x80550902;
@@ -502,6 +517,8 @@ public class SceKernelErrors {
     public final static int ERROR_NPDRM_TIME_SERVICE_NOT_STARTED                = 0x80550915;
     public final static int ERROR_NPDRM_NO_K_LICENSEE_SET                       = 0x80550916;
     public final static int ERROR_NPDRM_NO_FILENAME_MATCH                       = 0x80550917;
+
+    public final static int ERROR_LIB_UPDATE_LATEST_VERSION_INSTALLED           = 0x805F0004;
 
     public final static int ERROR_MPEG_BAD_VERSION                              = 0x80610002;
     public final static int ERROR_MPEG_NO_MEMORY                                = 0x80610022;

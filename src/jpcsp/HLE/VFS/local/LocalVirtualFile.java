@@ -18,10 +18,14 @@ package jpcsp.HLE.VFS.local;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.Map;
 
 import jpcsp.HLE.TPointer;
 import jpcsp.HLE.VFS.AbstractVirtualFile;
 import jpcsp.HLE.VFS.IVirtualFile;
+import jpcsp.HLE.modules.IoFileMgrForUser;
+import jpcsp.HLE.modules.IoFileMgrForUser.IoOperation;
+import jpcsp.HLE.modules.IoFileMgrForUser.IoOperationTiming;
 import jpcsp.filesystems.SeekableRandomFile;
 import jpcsp.util.Utilities;
 
@@ -67,6 +71,53 @@ public class LocalVirtualFile extends AbstractVirtualFile {
 		return inputLength;
 	}
 
+	@Override
+	public int ioIoctl(int command, TPointer inputPointer, int inputLength, TPointer outputPointer, int outputLength) {
+		int result;
+		switch (command) {
+			case 0x00005001:
+	        	if (inputLength != 0 || outputLength != 0) {
+	        		result = IO_ERROR;
+	        	} else {
+	        		result = 0;
+	        	}
+				break;
+            // Check if LoadExec is allowed on the file
+            case 0x00208013:
+            	if (log.isDebugEnabled()) {
+            		log.debug(String.format("Checking if LoadExec is allowed on '%s'", this));
+            	}
+            	// Result == 0: LoadExec allowed
+            	// Result != 0: LoadExec prohibited
+            	result = 0;
+            	break;
+            // Check if LoadModule is allowed on the file
+            case 0x00208003:
+            	if (log.isDebugEnabled()) {
+            		log.debug(String.format("Checking if LoadModule is allowed on '%s'", this));
+            	}
+            	// Result == 0: LoadModule allowed
+            	// Result != 0: LoadModule prohibited
+            	result = 0;
+            	break;
+            // Check if PRX type is allowed on the file
+            case 0x00208081:
+            case 0x00208082:
+            	if (log.isDebugEnabled()) {
+            		log.debug(String.format("Checking if PRX type is allowed on '%s'", this));
+            	}
+            	// Result == 0: PRX type allowed
+            	// Result != 0: PRX type prohibited
+            	result = 0;
+            	break;
+			default:
+				result = super.ioIoctl(command, inputPointer, inputLength, outputPointer, outputLength);
+				break;
+		}
+
+		return result;
+	}
+
 	public boolean isTruncateAtNextWrite() {
 		return truncateAtNextWrite;
 	}
@@ -83,6 +134,11 @@ public class LocalVirtualFile extends AbstractVirtualFile {
 		}
 
 		return super.duplicate();
+	}
+
+	@Override
+	public Map<IoOperation, IoOperationTiming> getTimings() {
+		return IoFileMgrForUser.noDelayTimings;
 	}
 
 	@Override

@@ -16,17 +16,31 @@ along with Jpcsp.  If not, see <http://www.gnu.org/licenses/>.
  */
 package jpcsp.HLE;
 
+import org.apache.log4j.Logger;
+
 import jpcsp.Emulator;
+import jpcsp.Memory;
+import jpcsp.NIDMapper;
+import jpcsp.Processor;
+import jpcsp.Allegrex.Common.Instruction;
+import jpcsp.Allegrex.compiler.RuntimeContext;
+import jpcsp.Allegrex.compiler.RuntimeContextLLE;
+import jpcsp.Allegrex.Common;
 import jpcsp.Allegrex.CpuState;
+import jpcsp.Allegrex.Decoder;
 import jpcsp.HLE.kernel.Managers;
 import jpcsp.HLE.kernel.types.SceModule;
 import jpcsp.format.DeferredStub;
 import jpcsp.settings.AbstractBoolSettingsListener;
 import jpcsp.settings.Settings;
+import jpcsp.util.Utilities;
 
 public class SyscallHandler {
+	private static Logger log = Modules.log;
     public static boolean ignoreUnmappedImports = false;
     public static final int syscallUnmappedImport = 0xFFFFF;
+    // Syscall number used by loadcore.prx to mark unmapped imports
+    public static final int syscallLoadCoreUnmappedImport = 0x00015;
     private static IgnoreUnmappedImportsSettingsListerner ignoreUnmappedImportsSettingsListerner;
 
 	private static class IgnoreUnmappedImportsSettingsListerner extends AbstractBoolSettingsListener {
@@ -43,15 +57,23 @@ public class SyscallHandler {
     private static void setEnableIgnoreUnmappedImports(boolean enable){
         ignoreUnmappedImports = enable;
         if (enable) {
-            Modules.log.info("Ignore Unmapped Imports enabled");
+            log.info("Ignore Unmapped Imports enabled");
         }
     }
 
-    private static void unsupportedSyscall(int code) {
+    private static void logMem(Memory mem, int address, String registerName) {
+    	if (Memory.isAddressGood(address)) {
+    		log.error(String.format("Memory at %s:%s", registerName, Utilities.getMemoryDump(address, 64)));
+    	}
+    }
+
+    private static int unsupportedSyscall(int code) {
     	if (ignoreUnmappedImportsSettingsListerner == null) {
     		ignoreUnmappedImportsSettingsListerner = new IgnoreUnmappedImportsSettingsListerner();
     		Settings.getInstance().registerSettingsListener("SyscallHandler", "emu.ignoreUnmappedImports", ignoreUnmappedImportsSettingsListerner);
     	}
+
+    	NIDMapper nidMapper = NIDMapper.getInstance();
 
     	if (code == syscallUnmappedImport) { // special code for unmapped imports
             CpuState cpu = Emulator.getProcessor().cpu;
@@ -68,34 +90,120 @@ public class SyscallHandler {
             }
 
             if (isEnableIgnoreUnmappedImports()) {
-	            Modules.log.warn(String.format("IGNORING: Unmapped import at %s - $a0=0x%08X $a1=0x%08X $a2=0x%08X", description, cpu._a0, cpu._a1, cpu._a2));
+	            log.warn(String.format("IGNORING: Unmapped import at %s - $a0=0x%08X $a1=0x%08X $a2=0x%08X", description, cpu._a0, cpu._a1, cpu._a2));
 	        } else {
-		        Modules.log.error(String.format("Unmapped import at %s - $a0=0x%08X $a1=0x%08X $a2=0x%08X", description, cpu._a0, cpu._a1, cpu._a2));
+		        log.error(String.format("Unmapped import at %s:", description));
+		        log.error(String.format("Registers: $a0=0x%08X, $a1=0x%08X, $a2=0x%08X, $a3=0x%08X", cpu._a0, cpu._a1, cpu._a2, cpu._a3));
+		        log.error(String.format("           $t0=0x%08X, $t1=0x%08X, $t2=0x%08X, $t3=0x%08X", cpu._t0, cpu._t1, cpu._t2, cpu._t3));
+		        log.error(String.format("           $ra=0x%08X, $sp=0x%08X", cpu._ra, cpu._sp));
+		        Memory mem = Emulator.getMemory();
+		        log.error(String.format("Caller code:"));
+		        for (int i = -96; i <= 40; i += 4) {
+		        	int address = cpu._ra + i;
+		        	int opcode = mem.read32(address);
+		        	Instruction insn = Decoder.instruction(opcode);
+		        	String disasm = insn.disasm(address, opcode);
+		        	log.error(String.format("%c 0x%08X:[%08X]: %s", i == -8 ? '>' : ' ', address, opcode, disasm));
+		        }
+		        logMem(mem, cpu._a0, Common.gprNames[Common._a0]);
+		        logMem(mem, cpu._a1, Common.gprNames[Common._a1]);
+		        logMem(mem, cpu._a2, Common.gprNames[Common._a2]);
+		        logMem(mem, cpu._a3, Common.gprNames[Common._a3]);
+		        logMem(mem, cpu._t0, Common.gprNames[Common._t0]);
+		        logMem(mem, cpu._t1, Common.gprNames[Common._t1]);
+		        logMem(mem, cpu._t2, Common.gprNames[Common._t2]);
+		        logMem(mem, cpu._t3, Common.gprNames[Common._t3]);
+		        Emulator.PauseEmu();
+	        }
+            cpu._v0 = 0;
+    	} else if (code == syscallLoadCoreUnmappedImport) {
+            CpuState cpu = Emulator.getProcessor().cpu;
+
+            String description = String.format("0x%08X", cpu.pc);
+            // Search for the module & NID to provide a better description
+            for (SceModule module : Managers.modules.values()) {
+            	for (DeferredStub deferredStub : module.unresolvedImports) {
+            		if (deferredStub.getImportAddress() == cpu.pc || deferredStub.getImportAddress() == cpu.pc - 4) {
+            			description = deferredStub.toString();
+            			break;
+            		}
+            	}
+            }
+
+            if (isEnableIgnoreUnmappedImports()) {
+	            log.warn(String.format("IGNORING: Unmapped import at %s - $a0=0x%08X $a1=0x%08X $a2=0x%08X", description, cpu._a0, cpu._a1, cpu._a2));
+	        } else {
+		        log.error(String.format("Unmapped import at %s:", description));
+		        log.error(String.format("Registers: $a0=0x%08X, $a1=0x%08X, $a2=0x%08X, $a3=0x%08X", cpu._a0, cpu._a1, cpu._a2, cpu._a3));
+		        log.error(String.format("           $t0=0x%08X, $t1=0x%08X, $t2=0x%08X, $t3=0x%08X", cpu._t0, cpu._t1, cpu._t2, cpu._t3));
+		        log.error(String.format("           $ra=0x%08X, $sp=0x%08X", cpu._ra, cpu._sp));
+		        Memory mem = Emulator.getMemory();
+		        log.error(String.format("Caller code:"));
+		        for (int i = -96; i <= 40; i += 4) {
+		        	int address = cpu._ra + i;
+		        	int opcode = mem.read32(address);
+		        	Instruction insn = Decoder.instruction(opcode);
+		        	String disasm = insn.disasm(address, opcode);
+		        	log.error(String.format("%c 0x%08X:[%08X]: %s", i == -8 ? '>' : ' ', address, opcode, disasm));
+		        }
+		        logMem(mem, cpu._a0, Common.gprNames[Common._a0]);
+		        logMem(mem, cpu._a1, Common.gprNames[Common._a1]);
+		        logMem(mem, cpu._a2, Common.gprNames[Common._a2]);
+		        logMem(mem, cpu._a3, Common.gprNames[Common._a3]);
+		        logMem(mem, cpu._t0, Common.gprNames[Common._t0]);
+		        logMem(mem, cpu._t1, Common.gprNames[Common._t1]);
+		        logMem(mem, cpu._t2, Common.gprNames[Common._t2]);
+		        logMem(mem, cpu._t3, Common.gprNames[Common._t3]);
 		        Emulator.PauseEmu();
 	        }
             cpu._v0 = 0;
         } else {
-        	// Check if this is the syscall
-        	// for an HLE function currently being uninstalled
-        	HLEModuleFunction hleModuleFunction = HLEModuleManager.getInstance().getFunctionFromSyscallCode(code);
-        	if (hleModuleFunction != null) {
-        		Modules.log.error(String.format("HLE Function %s(%s) not activated by default for Firmware Version %d", hleModuleFunction.getFunctionName(), hleModuleFunction.getModuleName(), Emulator.getInstance().getFirmwareVersion()));
+        	int address = nidMapper.getAddressBySyscall(code);
+
+        	if (address != 0) {
+	        	if (log.isDebugEnabled()) {
+	        		String name = nidMapper.getNameBySyscall(code);
+	        		int nid = nidMapper.getNidBySyscall(code);
+	        		if (name != null) {
+	        			log.debug(String.format("Jumping to 0x%08X instead of overwritten syscall %s[0x%08X]", address, name, nid));
+	        		} else {
+	        			log.debug(String.format("Jumping to 0x%08X instead of overwritten syscall NID 0x%08X", address, nid));
+	        		}
+	        	}
+
+	        	RuntimeContext.executeFunction(address);
         	} else {
-	            CpuState cpu = Emulator.getProcessor().cpu;
-	            String name = "";
-	            for (SyscallIgnore c : SyscallIgnore.values()) {
-	                if (c.getSyscall() == code) {
-	                	name = c.toString();
-	                	break;
-	                }
-	            }
-	            Modules.log.warn(String.format("Unsupported syscall %X %s $a0=0x%08X $a1=0x%08X $a2=0x%08X", code, name, cpu._a0, cpu._a1, cpu._a2));
+	        	// Check if this is the syscall
+	        	// for an HLE function currently being uninstalled
+        		String name = nidMapper.getNameBySyscall(code);
+        		if (name != null) {
+	        		log.error(String.format("HLE Function %s not activated by default for Firmware Version %d", name, Emulator.getInstance().getFirmwareVersion()));
+        		} else {
+	        		int nid = nidMapper.getNidBySyscall(code);
+	        		if (nid != 0) {
+	        			log.error(String.format("NID 0x%08X not activated by default for Firmware Version %d", nid, Emulator.getInstance().getFirmwareVersion()));
+	        		} else {
+	        			log.error(String.format("Unknown syscall 0x%05X", code));
+	        		}
+        		}
         	}
         }
+
+    	return 0;
     }
 
-    public static void syscall(int code) {
-    	// All syscalls are now implemented natively in the compiler
-    	unsupportedSyscall(code);
+    public static int syscall(int code) {
+    	if (RuntimeContextLLE.isLLEActive()) {
+    		Processor processor = Emulator.getProcessor();
+    		if (log.isDebugEnabled()) {
+    			log.debug(String.format("0x%08X - syscall 0x%05X", processor.cpu.pc, code));
+    		}
+
+    		// For LLE syscalls, trigger a syscall exception
+			return RuntimeContextLLE.triggerSyscallException(processor, code);
+    	}
+
+    	// All HLE syscalls are now implemented natively in the compiler
+		return unsupportedSyscall(code);
     }
 }

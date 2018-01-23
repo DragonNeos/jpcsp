@@ -774,7 +774,7 @@ public class NullRenderingEngine implements IRenderingEngine {
 	}
 
 	@Override
-	public boolean canNativeClut(int textureAddress, boolean textureSwizzle) {
+	public boolean canNativeClut(int textureAddress, int pixelFormat, boolean textureSwizzle) {
 		return false;
 	}
 
@@ -837,6 +837,15 @@ public class NullRenderingEngine implements IRenderingEngine {
 
 	@Override
 	public boolean setCopyRedToAlpha(boolean copyRedToAlpha) {
+		return false;
+	}
+
+	@Override
+	public void textureBarrier() {
+	}
+
+	@Override
+	public boolean isTextureBarrierAvailable() {
 		return false;
 	}
 }

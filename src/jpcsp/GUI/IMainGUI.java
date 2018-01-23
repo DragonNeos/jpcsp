@@ -5,6 +5,9 @@ import java.awt.Rectangle;
 import java.awt.Window;
 
 public interface IMainGUI {
+	void run();
+	void pause();
+	void reset();
 	void setMainTitle(String title);
 	void RefreshButtons();
 	void setLocation();
@@ -45,4 +48,6 @@ public interface IMainGUI {
 
 	public void setDisplayMinimumSize(int width, int height);
 	public void setDisplaySize(int width, int height);
+
+	public boolean isRunningFromVsh();
 }

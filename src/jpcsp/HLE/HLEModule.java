@@ -30,6 +30,7 @@ import jpcsp.settings.Settings;
 abstract public class HLEModule {
 	private SysMemInfo memory;
 	private String name;
+	private boolean started = false;
 
 	public HashMap<String, HLEModuleFunction> installedHLEModuleFunctions = new HashMap<String, HLEModuleFunction>();
 
@@ -49,19 +50,25 @@ abstract public class HLEModule {
 	 */
 	public HLEModuleFunction getHleFunctionByName(String functionName) throws RuntimeException {
 		if (!installedHLEModuleFunctions.containsKey(functionName)) {
-			Modules.log.error(String.format("Can't find hle function '%s' on module '%s'", functionName, getName()));
+			Modules.log.error(String.format("Can't find HLE function '%s' in module '%s'", functionName, this));
 			return null;
 		}
 
 		return installedHLEModuleFunctions.get(functionName);
 	}
 
+	public boolean isStarted() {
+		return started;
+	}
+
 	public void start() {
+		started = true;
 	}
 
 	public void stop() {
 		// Remove all the settings listener defined for this module
 		Settings.getInstance().removeSettingsListener(getName());
+		started = false;
 	}
 
 	protected void setSettingsListener(String option, ISettingsListener settingsListener) {
@@ -99,5 +106,10 @@ abstract public class HLEModule {
 			Modules.SysMemUserForUserModule.free(memory);
 			memory = null;
 		}
+	}
+
+	@Override
+	public String toString() {
+		return getName();
 	}
 }

@@ -17,6 +17,7 @@
 package jpcsp.util;
 
 import static java.lang.System.arraycopy;
+import static jpcsp.Memory.addressMask;
 
 import java.io.BufferedReader;
 import java.io.Closeable;
@@ -24,22 +25,43 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
+import java.net.InetAddress;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import jpcsp.Emulator;
 import jpcsp.Memory;
 import jpcsp.MemoryMap;
+import jpcsp.Allegrex.Common;
 import jpcsp.Allegrex.CpuState;
+import jpcsp.Allegrex.compiler.RuntimeContext;
+import jpcsp.HLE.HLEModuleFunction;
+import jpcsp.HLE.HLEModuleManager;
 import jpcsp.HLE.Modules;
+import jpcsp.HLE.TPointer;
 import jpcsp.HLE.VFS.IVirtualFile;
+import jpcsp.HLE.kernel.types.SceModule;
 import jpcsp.filesystems.SeekableDataInput;
 import jpcsp.filesystems.SeekableRandomFile;
 import jpcsp.filesystems.umdiso.UmdIsoFile;
@@ -49,8 +71,20 @@ import jpcsp.memory.MemoryReader;
 import jpcsp.memory.MemoryWriter;
 
 public class Utilities {
-
     private static final int[] round4 = {0, 3, 2, 1};
+    public  static final String lineSeparator = System.getProperty("line.separator");
+    private static final char[] lineTemplate = (lineSeparator + "0x00000000 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  >................<").toCharArray();
+    private static final char[] hexDigits = "0123456789ABCDEF".toCharArray();
+    private static final char[] ascii = new char[256];
+	static {
+		for (int i = 0; i < ascii.length; i++) {
+			char c = (char) i;
+	        if (c < ' ' || c > '~') {
+	            c = '.';
+	        }
+	        ascii[i] = c;
+		}
+	}
 
     public static String formatString(String type, String oldstring) {
         int counter = 0;
@@ -166,9 +200,7 @@ public class Utilities {
 
             if (length >= bytes.length) {
                 // Extend the bytes array
-                byte[] newBytes = new byte[bytes.length + 10000];
-                System.arraycopy(bytes, 0, newBytes, 0, bytes.length);
-                bytes = newBytes;
+            	bytes = extendArray(bytes, 10000);
             }
 
             bytes[length] = (byte) b;
@@ -186,6 +218,32 @@ public class Utilities {
 
     public static String readStringZ(int address) {
         return readStringZ(Memory.getInstance(), address);
+    }
+
+    public static String readStringNZ(byte[] buffer, int offset, int n) {
+    	StringBuilder s = new StringBuilder();
+    	for (int i = 0; i < n; i++) {
+    		byte b = buffer[offset + i];
+    		if (b == (byte) 0) {
+    			break;
+    		}
+    		s.append((char) b);
+    	}
+
+    	return s.toString();
+    }
+
+    public static String readStringZ(byte[] buffer, int offset) {
+    	StringBuilder s = new StringBuilder();
+    	while (offset < buffer.length) {
+    		byte b = buffer[offset++];
+    		if (b == (byte) 0) {
+    			break;
+    		}
+    		s.append((char) b);
+    	}
+
+    	return s.toString();
     }
 
     public static String readStringNZ(int address, int n) {
@@ -207,6 +265,19 @@ public class Utilities {
             offset++;
         }
         memoryWriter.flush();
+    }
+
+    public static void writeStringNZ(byte[] buffer, int offset, int n, String s) {
+        if (s != null) {
+            byte[] bytes = s.getBytes(Constants.charset);
+            int length = Math.min(n, bytes.length);
+            System.arraycopy(bytes, 0, buffer, offset, length);
+            if (length < n) {
+            	Arrays.fill(buffer, offset + length, offset + n, (byte) 0);
+            }
+        } else {
+        	Arrays.fill(buffer, offset, offset + n, (byte) 0);
+        }
     }
 
     public static void writeStringZ(Memory mem, int address, String s) {
@@ -244,6 +315,20 @@ public class Utilities {
         return getUnsignedByte(buf) | (getUnsignedByte(buf) << 8) | (getUnsignedByte(buf) << 16) | (getUnsignedByte(buf) << 24);
     }
 
+    public static int read8(IVirtualFile vFile) throws IOException {
+    	byte[] buffer = new byte[1];
+    	int result = vFile.ioRead(buffer, 0, buffer.length);
+    	if (result < buffer.length) {
+    		return 0;
+    	}
+
+    	return buffer[0] & 0xFF;
+    }
+
+    public static int read32(IVirtualFile vFile) throws IOException {
+    	return read8(vFile) | (read8(vFile) << 8) | (read8(vFile) << 16) | (read8(vFile) << 24);
+    }
+
     public static void writeWord(ByteBuffer buf, int value) {
         putUnsignedByte(buf, value >> 0);
         putUnsignedByte(buf, value >> 8);
@@ -260,25 +345,126 @@ public class Utilities {
         putUnsignedByte(buf, value);
     }
 
-    public static int parseAddress(String value) throws NumberFormatException {
+    public static int parseAddress(String s) throws NumberFormatException {
         int address = 0;
-        if (value == null) {
+        if (s == null) {
             return address;
         }
 
-        value = value.trim();
+        s = s.trim();
 
-        if (value.startsWith("0x")) {
-            value = value.substring(2);
+        if (s.startsWith("0x")) {
+            s = s.substring(2);
         }
 
-        if (value.length() == 8 && value.charAt(0) >= '8') {
-            address = (int) Long.parseLong(value, 16);
+        if (s.length() == 8 && s.charAt(0) >= '8') {
+            address = (int) Long.parseLong(s, 16);
         } else {
-            address = Integer.parseInt(value, 16);
+            address = Integer.parseInt(s, 16);
         }
 
         return address;
+    }
+
+    public static int parseInteger(String s) throws NumberFormatException {
+        int value = 0;
+        if (s == null) {
+            return value;
+        }
+
+        s = s.trim();
+
+        boolean neg = false;
+        if (s.startsWith("-")) {
+        	s = s.substring(1);
+        	neg = true;
+        }
+
+        int base = 10;
+        if (s.startsWith("0x")) {
+            s = s.substring(2);
+            base = 16;
+        }
+
+        if (s.length() == 8 && s.charAt(0) >= '8') {
+            value = (int) Long.parseLong(s, base);
+        } else {
+            value = Integer.parseInt(s, base);
+        }
+
+        if (neg) {
+        	value = -value;
+        }
+
+        return value;
+    }
+
+    public static int getRegister(String s) {
+    	for (int i = 0; i < Common.gprNames.length; i++) {
+    		if (Common.gprNames[i].equalsIgnoreCase(s)) {
+    			return i;
+    		}
+    	}
+
+    	return -1;
+    }
+
+    public static int parseAddressExpression(String s) {
+    	if (s == null) {
+    		return 0;
+    	}
+
+    	s = s.trim();
+
+    	// Build a pattern matching all Gpr register names
+    	String regPattern = "";
+    	for (String gprName : Common.gprNames) {
+    		regPattern += "\\" + gprName + "|";
+    	}
+
+    	Memory mem = Emulator.getMemory();
+    	CpuState cpu = Emulator.getProcessor().cpu;
+    	Pattern p;
+    	Matcher m;
+
+    	// Parse e.g.: "$a0"
+    	p = Pattern.compile(regPattern);
+    	m = p.matcher(s);
+    	if (m.matches()) {
+    		int reg = getRegister(s);
+    		if (reg >= 0) {
+    			return cpu.getRegister(reg);
+    		}
+    	}
+
+    	// Parse e.g.: "16($a0)", "0xc($a1)"
+    	p = Pattern.compile("((0x)?\\p{XDigit}+)\\((" + regPattern + ")\\)");
+    	m = p.matcher(s);
+    	if (m.matches()) {
+    		int offset = parseInteger(m.group(1));
+    		int reg = getRegister(m.group(3));
+
+    		if (reg >= 0) {
+    			return mem.read32(cpu.getRegister(reg) + offset);
+    		}
+    	}
+
+    	// Parse e.g.: "$a0 + 16", "$a1 - 0xc"
+    	p = Pattern.compile("(" + regPattern + ")\\s*([+\\-])\\s*((0x)?\\p{XDigit}+)");
+    	m = p.matcher(s);
+    	if (m.matches()) {
+    		int reg = getRegister(m.group(1));
+    		int offset = parseInteger(m.group(3));
+    		if (m.group(2).equals("-")) {
+    			offset = -offset;
+    		}
+
+    		if (reg >= 0) {
+    			return cpu.getRegister(reg) + offset;
+    		}
+    	}
+
+    	return Utilities.parseAddress(s);
     }
 
     /**
@@ -544,25 +730,19 @@ public class Utilities {
     private static void addAsciiDump(StringBuilder dump, IMemoryReader charReader, int bytesPerLine) {
         dump.append("  >");
         for (int i = 0; i < bytesPerLine; i++) {
-            char c = (char) charReader.readNext();
-            if (c < ' ' || c > '~') {
-                c = '.';
-            }
-            dump.append(c);
+        	dump.append(ascii[charReader.readNext()]);
         }
         dump.append("<");
     }
 
     private static String getMemoryDump(int address, int length, int step, int bytesPerLine, IMemoryReader memoryReader, IMemoryReader charReader) {
         StringBuilder dump = new StringBuilder();
-        String lineSeparator = System.getProperty("line.separator");
 
         if (length < bytesPerLine) {
             bytesPerLine = length;
         }
 
         String format = String.format(" %%0%dX", step * 2);
-        boolean startOfLine = true;
         for (int i = 0; i < length; i += step) {
             if ((i % bytesPerLine) < step) {
                 if (i > 0) {
@@ -570,11 +750,7 @@ public class Utilities {
                     addAsciiDump(dump, charReader, bytesPerLine);
                 }
                 dump.append(lineSeparator);
-                startOfLine = true;
-            }
-            if (startOfLine) {
                 dump.append(String.format("0x%08X", address + i));
-                startOfLine = false;
             }
 
             int value = memoryReader.readNext();
@@ -611,13 +787,147 @@ public class Utilities {
         return dump.toString();
     }
 
+    // Optimize the most common case
+    private static String getMemoryDump(int[] memoryInt, int address, int length) {
+    	final int numberLines = length >> 4;
+    	final char[] chars = new char[numberLines * lineTemplate.length];
+    	final int lineOffset = lineSeparator.length() + 2;
+
+    	for (int i = 0, j = 0, a = (address & Memory.addressMask) >> 2; i < numberLines; i++, j += lineTemplate.length, address += 16) {
+    		System.arraycopy(lineTemplate, 0, chars, j, lineTemplate.length);
+
+    		// Address field
+    		int k = j + lineOffset;
+    		chars[k++] = hexDigits[(address >>> 28)      ];
+    		chars[k++] = hexDigits[(address >>  24) & 0xF];
+    		chars[k++] = hexDigits[(address >>  20) & 0xF];
+    		chars[k++] = hexDigits[(address >>  16) & 0xF];
+    		chars[k++] = hexDigits[(address >>  12) & 0xF];
+    		chars[k++] = hexDigits[(address >>   8) & 0xF];
+    		chars[k++] = hexDigits[(address >>   4) & 0xF];
+    		chars[k++] = hexDigits[(address       ) & 0xF];
+    		k++;
+
+    		// First 32-bit value
+    		int value = memoryInt[a++];
+    		if (value != 0) {
+	    		chars[k++] = hexDigits[(value >>   4) & 0xF];
+	    		chars[k++] = hexDigits[(value       ) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  12) & 0xF];
+	    		chars[k++] = hexDigits[(value >>   8) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  20) & 0xF];
+	    		chars[k++] = hexDigits[(value >>  16) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>> 28)      ];
+	    		chars[k++] = hexDigits[(value >>  24) & 0xF];
+	    		k++;
+
+	    		chars[k + 38] = ascii[(value       ) & 0xFF];
+	    		chars[k + 39] = ascii[(value >>   8) & 0xFF];
+	    		chars[k + 40] = ascii[(value >>  16) & 0xFF];
+	    		chars[k + 41] = ascii[(value >>> 24)       ];
+    		} else {
+    			k += 12;
+    		}
+
+    		// Second 32-bit value
+    		value = memoryInt[a++];
+    		if (value != 0) {
+	    		chars[k++] = hexDigits[(value >>   4) & 0xF];
+	    		chars[k++] = hexDigits[(value       ) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  12) & 0xF];
+	    		chars[k++] = hexDigits[(value >>   8) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  20) & 0xF];
+	    		chars[k++] = hexDigits[(value >>  16) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>> 28)      ];
+	    		chars[k++] = hexDigits[(value >>  24) & 0xF];
+	    		k++;
+
+	    		chars[k + 30] = ascii[(value       ) & 0xFF];
+	    		chars[k + 31] = ascii[(value >>   8) & 0xFF];
+	    		chars[k + 32] = ascii[(value >>  16) & 0xFF];
+	    		chars[k + 33] = ascii[(value >>> 24)       ];
+    		} else {
+    			k += 12;
+    		}
+
+    		// Third 32-bit value
+    		value = memoryInt[a++];
+    		if (value != 0) {
+	    		chars[k++] = hexDigits[(value >>   4) & 0xF];
+	    		chars[k++] = hexDigits[(value       ) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  12) & 0xF];
+	    		chars[k++] = hexDigits[(value >>   8) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  20) & 0xF];
+	    		chars[k++] = hexDigits[(value >>  16) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>> 28)      ];
+	    		chars[k++] = hexDigits[(value >>  24) & 0xF];
+	    		k++;
+
+	    		chars[k + 22] = ascii[(value       ) & 0xFF];
+	    		chars[k + 23] = ascii[(value >>   8) & 0xFF];
+	    		chars[k + 24] = ascii[(value >>  16) & 0xFF];
+	    		chars[k + 25] = ascii[(value >>> 24)       ];
+    		} else {
+    			k += 12;
+    		}
+
+    		// Fourth 32-bit value
+    		value = memoryInt[a++];
+    		if (value != 0) {
+	    		chars[k++] = hexDigits[(value >>   4) & 0xF];
+	    		chars[k++] = hexDigits[(value       ) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  12) & 0xF];
+	    		chars[k++] = hexDigits[(value >>   8) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>  20) & 0xF];
+	    		chars[k++] = hexDigits[(value >>  16) & 0xF];
+	    		k++;
+	    		chars[k++] = hexDigits[(value >>> 28)      ];
+	    		chars[k++] = hexDigits[(value >>  24) & 0xF];
+	    		k += 15;
+
+	    		chars[k++] = ascii[(value       ) & 0xFF];
+	    		chars[k++] = ascii[(value >>   8) & 0xFF];
+	    		chars[k++] = ascii[(value >>  16) & 0xFF];
+	    		chars[k  ] = ascii[(value >>> 24)       ];
+    		}
+    	}
+
+    	return new String(chars);
+    }
+
     public static String getMemoryDump(int address, int length) {
-        // Convenience function using default step and bytesPerLine
+    	if (RuntimeContext.hasMemoryInt() && (length & 0xF) == 0 && (address & 0x3) == 0) {
+    	    // The most common case has been optimized
+    		return getMemoryDump(RuntimeContext.getMemoryInt(), address, length);
+    	}
+
+    	// Convenience function using default step and bytesPerLine
         return getMemoryDump(address, length, 1, 16);
     }
 
+    public static String getMemoryDump(Memory mem, int address, int length) {
+    	IMemoryReader memoryReader = MemoryReader.getMemoryReader(mem, address, length, 1);
+    	IMemoryReader charReader = MemoryReader.getMemoryReader(mem, address, length, 1);
+
+    	return getMemoryDump(address, length, 1, 16, memoryReader, charReader);
+    }
+
     public static String getMemoryDump(int address, int length, int step, int bytesPerLine) {
-        if (!Memory.isAddressGood(address) || length <= 0 || bytesPerLine <= 0 || step <= 0) {
+    	if (!Memory.isAddressGood(address)) {
+    		return String.format("Invalid memory address 0x%08X", address);
+    	}
+        if (length <= 0 || bytesPerLine <= 0 || step <= 0) {
             return "";
         }
 
@@ -625,6 +935,10 @@ public class Utilities {
         IMemoryReader charReader = MemoryReader.getMemoryReader(address, length, 1);
 
         return getMemoryDump(address, length, step, bytesPerLine, memoryReader, charReader);
+    }
+
+    public static String getMemoryDump(byte[] bytes) {
+		return getMemoryDump(bytes, 0, bytes == null ? 0 : bytes.length);
     }
 
     public static String getMemoryDump(byte[] bytes, int offset, int length) {
@@ -637,8 +951,8 @@ public class Utilities {
             return "";
         }
 
-        IMemoryReader memoryReader = MemoryReader.getMemoryReader(bytes, offset, length, step);
-        IMemoryReader charReader = MemoryReader.getMemoryReader(bytes, offset, length, step);
+        IMemoryReader memoryReader = MemoryReader.getMemoryReader(0, bytes, offset, length, step);
+        IMemoryReader charReader = MemoryReader.getMemoryReader(0, bytes, offset, length, step);
 
         return getMemoryDump(0, length, step, bytesPerLine, memoryReader, charReader);
     }
@@ -695,6 +1009,17 @@ public class Utilities {
                 | (read8(buffer, offset));
     }
 
+    public static long readUnaligned64(byte[] buffer, int offset) {
+        return (((long) read8(buffer, offset + 7)) << 56)
+        		| (((long) read8(buffer, offset + 6)) << 48)
+        		| (((long) read8(buffer, offset + 5)) << 40)
+        		| (((long) read8(buffer, offset + 4)) << 32)
+        		| (((long) read8(buffer, offset + 3)) << 24)
+                | (((long) read8(buffer, offset + 2)) << 16)
+                | (((long) read8(buffer, offset + 1)) << 8)
+                | (((long) read8(buffer, offset)));
+    }
+
     public static int readUnaligned16(byte[] buffer, int offset) {
         return (read8(buffer, offset + 1) << 8) | read8(buffer, offset);
     }
@@ -714,6 +1039,29 @@ public class Utilities {
                 mem.write8(address + 2, (byte) (data >> 16));
                 mem.write8(address + 3, (byte) (data >> 24));
         }
+    }
+
+    public static void writeUnaligned32(byte[] buffer, int offset, int data) {
+    	buffer[offset + 0] = (byte) data;
+    	buffer[offset + 1] = (byte) (data >> 8);
+    	buffer[offset + 2] = (byte) (data >> 16);
+    	buffer[offset + 3] = (byte) (data >> 24);
+    }
+
+    public static void writeUnaligned16(byte[] buffer, int offset, int data) {
+    	buffer[offset + 0] = (byte) data;
+    	buffer[offset + 1] = (byte) (data >> 8);
+    }
+
+    public static void writeUnaligned64(byte[] buffer, int offset, long data) {
+    	buffer[offset + 0] = (byte) data;
+    	buffer[offset + 1] = (byte) (data >> 8);
+    	buffer[offset + 2] = (byte) (data >> 16);
+    	buffer[offset + 3] = (byte) (data >> 24);
+    	buffer[offset + 4] = (byte) (data >> 32);
+    	buffer[offset + 5] = (byte) (data >> 40);
+    	buffer[offset + 6] = (byte) (data >> 48);
+    	buffer[offset + 7] = (byte) (data >> 56);
     }
 
     public static int min(int a, int b) {
@@ -1098,6 +1446,40 @@ public class Utilities {
         memoryWriter.flush();
     }
 
+    public static void readInt32(int address, int length, int[] a, int offset) {
+    	final int length4 = length >> 2;
+		// Optimize the most common case
+		if (RuntimeContext.hasMemoryInt()) {
+			System.arraycopy(RuntimeContext.getMemoryInt(), (address & addressMask) >> 2, a, offset, length4);
+		} else {
+			IMemoryReader memoryReader = MemoryReader.getMemoryReader(address, length, 4);
+			for (int i = 0; i < length4; i++) {
+				a[offset + i] = memoryReader.readNext();
+			}
+		}
+    }
+
+    public static void writeInt32(int address, int length, int[] a, int offset) {
+    	final int length4 = length >> 2;
+		// Optimize the most common case
+    	if (RuntimeContext.hasMemoryInt()) {
+    		System.arraycopy(a, offset, RuntimeContext.getMemoryInt(), (address & addressMask) >> 2, length4);
+    	} else {
+	    	IMemoryWriter memoryWriter = MemoryWriter.getMemoryWriter(address, length, 4);
+	    	for (int i = 0; i < length4; i++) {
+	    		memoryWriter.writeNext(a[offset + i]);
+	    	}
+	    	memoryWriter.flush();
+    	}
+    }
+
+    public static int[] readInt32(int address, int length) {
+		int[] a = new int[length >> 2];
+		readInt32(address, length, a, 0);
+
+		return a;
+    }
+
     public static int round4(int n) {
         return n + round4[n & 3];
     }
@@ -1115,6 +1497,115 @@ public class Utilities {
         System.arraycopy(array, 0, newArray, 0, array.length);
 
         return newArray;
+    }
+
+    public static byte[] extendArray(byte[] array, int extend) {
+        if (array == null) {
+            return new byte[extend];
+        }
+
+        byte[] newArray = new byte[array.length + extend];
+        System.arraycopy(array, 0, newArray, 0, array.length);
+
+        return newArray;
+    }
+
+    public static byte[] extendArray(byte[] array, byte[] extend) {
+    	if (extend == null) {
+    		return array;
+    	}
+    	return extendArray(array, extend, 0, extend.length);
+    }
+
+    public static byte[] extendArray(byte[] array, byte[] extend, int offset, int length) {
+    	if (length <= 0) {
+    		return array;
+    	}
+
+    	if (array == null) {
+    		array = new byte[length];
+    		System.arraycopy(extend, offset, array, 0, length);
+            return array;
+        }
+
+        byte[] newArray = new byte[array.length + length];
+        System.arraycopy(array, 0, newArray, 0, array.length);
+        System.arraycopy(extend, offset, newArray, array.length, length);
+
+        return newArray;
+    }
+
+    public static byte[] copyToArrayAndExtend(byte[] destination, int destinationOffset, byte[] source, int sourceOffset, int length) {
+    	if (source == null || length <= 0) {
+    		return destination;
+    	}
+
+    	if (destination == null) {
+    		destination = new byte[destinationOffset + length];
+    		System.arraycopy(source, sourceOffset, destination, destinationOffset, length);
+    		return destination;
+    	}
+
+    	if (destinationOffset + length > destination.length) {
+    		destination = extendArray(destination, destinationOffset + length - destination.length);
+    	}
+
+    	System.arraycopy(source, sourceOffset, destination, destinationOffset, length);
+
+    	return destination;
+    }
+
+    public static TPointer[] extendArray(TPointer[] array, int extend) {
+        if (array == null) {
+            return new TPointer[extend];
+        }
+
+        TPointer[] newArray = new TPointer[array.length + extend];
+        System.arraycopy(array, 0, newArray, 0, array.length);
+
+        return newArray;
+    }
+
+    public static String[] add(String[] array, String s) {
+    	if (s == null) {
+    		return array;
+    	}
+    	if (array == null) {
+    		return new String[] { s };
+    	}
+
+    	String[] newArray = new String[array.length + 1];
+    	System.arraycopy(array, 0, newArray, 0, array.length);
+    	newArray[array.length] = s;
+
+    	return newArray;
+    }
+
+    public static int[] add(int[] array, int n) {
+    	if (array == null) {
+    		return new int[] { n };
+    	}
+
+    	int[] newArray = new int[array.length + 1];
+    	System.arraycopy(array, 0, newArray, 0, array.length);
+    	newArray[array.length] = n;
+
+    	return newArray;
+    }
+
+    public static File[] add(File[] array, File f) {
+    	if (f == null) {
+    		return array;
+    	}
+    	if (array == null) {
+    		return new File[] { f };
+    	}
+
+    	File[] newArray = new File[array.length + 1];
+    	System.arraycopy(array, 0, newArray, 0, array.length);
+    	newArray[array.length] = f;
+
+    	return newArray;
     }
 
     public static byte[] readCompleteFile(IVirtualFile vFile) {
@@ -1233,5 +1724,207 @@ public class Utilities {
     	long low = cpu._v0;
     	long high = cpu._v1;
     	return (low & 0xFFFFFFFFL) | (high << 32);
+    }
+
+    public static int convertABGRtoARGB(int abgr) {
+    	return (abgr & 0xFF00FF00) | ((abgr & 0x00FF0000) >> 16) | ((abgr & 0x000000FF) << 16);
+    }
+
+    public static void disableSslCertificateChecks() {
+		try {
+			TrustManager[] trustAllCerts = new TrustManager[] {
+					new X509TrustManager() {
+						@Override
+						public java.security.cert.X509Certificate[] getAcceptedIssuers() { return null; }
+						@Override
+						public void checkClientTrusted(X509Certificate[] certs, String authType) {  }
+						@Override
+						public void checkServerTrusted(X509Certificate[] certs, String authType) {  }
+					}
+			};
+			SSLContext sc = SSLContext.getInstance("SSL");
+			sc.init(null, trustAllCerts, new SecureRandom());
+			HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+			HostnameVerifier allHostsValid = new HostnameVerifier() {
+				@Override
+				public boolean verify(String hostname, SSLSession session) {
+					return true;
+				}
+			};
+			HttpsURLConnection.setDefaultHostnameVerifier(allHostsValid);
+		} catch (NoSuchAlgorithmException e) {
+			Emulator.log.error(e);
+		} catch (KeyManagementException e) {
+			Emulator.log.error(e);
+		}
+    }
+
+    public static int getDefaultPortForProtocol(String protocol) {
+		if ("http".equals(protocol)) {
+			return 80;
+		}
+		if ("https".equals(protocol)) {
+			return 443;
+		}
+
+		return -1;
+	}
+
+	public static String[] merge(String[] a1, String[] a2) {
+		if (a1 == null) {
+			return a2;
+		}
+		if (a2 == null) {
+			return a1;
+		}
+
+		String[] a = new String[a1.length + a2.length];
+		System.arraycopy(a1, 0, a, 0, a1.length);
+		System.arraycopy(a2, 0, a, a1.length, a2.length);
+
+		return a;
+	}
+
+	public static InetAddress[] merge(InetAddress[] a1, InetAddress[] a2) {
+		if (a1 == null) {
+			return a2;
+		}
+		if (a2 == null) {
+			return a1;
+		}
+
+		InetAddress[] a = new InetAddress[a1.length + a2.length];
+		System.arraycopy(a1, 0, a, 0, a1.length);
+		System.arraycopy(a2, 0, a, a1.length, a2.length);
+
+		return a;
+	}
+
+	public static InetAddress[] add(InetAddress[] array, InetAddress inetAddress) {
+    	if (inetAddress == null) {
+    		return array;
+    	}
+    	if (array == null) {
+    		return new InetAddress[] { inetAddress };
+    	}
+
+    	InetAddress[] newArray = new InetAddress[array.length + 1];
+    	System.arraycopy(array, 0, newArray, 0, array.length);
+    	newArray[array.length] = inetAddress;
+
+    	return newArray;
+	}
+
+	public static boolean equals(byte[] array1, int offset1, byte[] array2, int offset2, int length) {
+		for (int i = 0; i < length; i++) {
+			if (array1[offset1 + i] != array2[offset2 + i]) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+
+    public static void patch(Memory mem, SceModule module, int offset, int oldValue, int newValue) {
+    	patch(mem, module, offset, oldValue, newValue, 0xFFFFFFFF);
+    }
+
+    public static void patch(Memory mem, SceModule module, int offset, int oldValue, int newValue, int mask) {
+    	int checkValue = mem.read32(module.baseAddress + offset);
+    	if ((checkValue & mask) != (oldValue & mask)) {
+    		Emulator.log.error(String.format("Patching of module '%s' failed at offset 0x%X, 0x%08X found instead of 0x%08X", module.modname, offset, checkValue, oldValue));
+    	} else {
+    		mem.write32(module.baseAddress + offset, newValue);
+    	}
+    }
+
+    public static void patchRemoveStringChar(Memory mem, SceModule module, int offset, int oldChar) {
+    	int address = module.baseAddress + offset;
+    	int checkChar = mem.read8(address);
+    	if (checkChar != oldChar) {
+    		Emulator.log.error(String.format("Patching of module '%s' failed at offset 0x%X, 0x%02X found instead of 0x%02X: %s", module.modname, offset, checkChar, oldChar, Utilities.getMemoryDump(address - 0x100, 0x200)));
+    	} else {
+    		String s = Utilities.readStringZ(address);
+    		s = s.substring(1);
+    		Utilities.writeStringZ(mem, address, s);
+    	}
+    }
+
+    public static HLEModuleFunction getHLEFunctionByAddress(int address) {
+		HLEModuleFunction func = HLEModuleManager.getInstance().getFunctionFromAddress(address);
+		if (func == null) {
+			func = Modules.LoadCoreForKernelModule.getHLEFunctionByAddress(address);
+		}
+
+		return func;
+    }
+
+    public static String getFunctionNameByAddress(int address) {
+    	String functionName = null;
+
+		HLEModuleFunction func = HLEModuleManager.getInstance().getFunctionFromAddress(address);
+		if (func != null) {
+			functionName = func.getFunctionName();
+		}
+
+		if (functionName == null) {
+			functionName = Modules.LoadCoreForKernelModule.getFunctionNameByAddress(address);
+		}
+
+		return functionName;
+    }
+
+    public static void addHex(StringBuilder s, int value) {
+    	if (value == 0) {
+    		s.append('0');
+    		return;
+    	}
+
+    	int shift = 28 - (Integer.numberOfLeadingZeros(value) & 0x3C);
+    	for (; shift >= 0; shift -= 4) {
+    		int digit = (value >> shift) & 0xF;
+    		s.append(hexDigits[digit]);
+    	}
+    }
+
+    public static void addAddressHex(StringBuilder s, int address) {
+		s.append(hexDigits[(address >>> 28)      ]);
+		s.append(hexDigits[(address >>  24) & 0xF]);
+		s.append(hexDigits[(address >>  20) & 0xF]);
+		s.append(hexDigits[(address >>  16) & 0xF]);
+		s.append(hexDigits[(address >>  12) & 0xF]);
+		s.append(hexDigits[(address >>   8) & 0xF]);
+		s.append(hexDigits[(address >>   4) & 0xF]);
+		s.append(hexDigits[(address       ) & 0xF]);
+    }
+
+    public static boolean hasBit(int value, int bit) {
+    	return (value & (1 << bit)) != 0;
+    }
+
+    public static int setBit(int value, int bit) {
+    	return value | (1 << bit);
+    }
+
+    public static int clearBit(int value, int bit) {
+    	return value & ~(1 << bit);
+    }
+
+    public static ByteBuffer readAsByteBuffer(RandomAccessFile raf) throws IOException {
+        byte[] bytes = new byte[(int) raf.length()];
+        int offset = 0;
+        // Read large files by chunks.
+        while (offset < bytes.length) {
+            int len = raf.read(bytes, offset, Math.min(10 * 1024, bytes.length - offset));
+            if (len < 0) {
+                break;
+            }
+            if (len > 0) {
+                offset += len;
+            }
+        }
+
+        return ByteBuffer.wrap(bytes, 0, offset);
     }
 }

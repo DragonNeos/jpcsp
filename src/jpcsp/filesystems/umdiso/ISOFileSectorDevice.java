@@ -27,7 +27,11 @@ public class ISOFileSectorDevice extends AbstractFileSectorDevice {
 
 	@Override
 	public void readSector(int sectorNumber, byte[] buffer, int offset) throws IOException {
-        fileAccess.seek(((long) sectorLength) * sectorNumber);
+		if (fileAccess == null) {
+			return;
+		}
+
+		fileAccess.seek(((long) sectorLength) * sectorNumber);
         int length = fileAccess.read(buffer, offset, sectorLength);
         if (length < sectorLength) {
         	Arrays.fill(buffer, length, sectorLength, (byte) 0);
@@ -36,8 +40,17 @@ public class ISOFileSectorDevice extends AbstractFileSectorDevice {
 
 	@Override
 	public int readSectors(int sectorNumber, int numberSectors, byte[] buffer, int offset) throws IOException {
+		if (fileAccess == null) {
+			return 0;
+		}
+
     	fileAccess.seek(((long) sectorLength) * sectorNumber);
     	int length = fileAccess.read(buffer, offset, numberSectors * sectorLength);
+    	int lastSectorGap = length % sectorLength;
+    	if (lastSectorGap > 0) {
+    		Arrays.fill(buffer, length, length + lastSectorGap, (byte) 0);
+    		length += lastSectorGap;
+    	}
 
     	return length / sectorLength;
 	}
@@ -49,6 +62,10 @@ public class ISOFileSectorDevice extends AbstractFileSectorDevice {
 
 	@Override
 	public void writeSectors(int sectorNumber, int numberSectors, byte[] buffer, int offset) throws IOException {
+		if (fileAccess == null) {
+			return;
+		}
+
         fileAccess.seek(((long) sectorLength) * sectorNumber);
         fileAccess.write(buffer, offset, numberSectors * sectorLength);
 	}

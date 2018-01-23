@@ -64,6 +64,9 @@ public class PspGeList {
     private Semaphore sync; // Used for async display
     private IMemoryReader memoryReader;
     private int saveContextAddr;
+    private IMemoryReader baseMemoryReader;
+    private int baseMemoryReaderStartAddress;
+    private int baseMemoryReaderEndAddress;
 
     public PspGeList(int id) {
     	videoEngine = VideoEngine.getInstance();
@@ -81,6 +84,9 @@ public class PspGeList {
         ended = true;
         restarted = false;
         memoryReader = null;
+        baseMemoryReader = null;
+        baseMemoryReaderStartAddress = 0;
+        baseMemoryReaderEndAddress = 0;
         pc = 0;
         saveContextAddr = 0;
     }
@@ -239,12 +245,28 @@ public class PspGeList {
     	}
     }
 
+    public synchronized void setStallAddr(int stall_addr, IMemoryReader baseMemoryReader, int startAddress, int endAddress) {
+    	// Both the stall address and the base memory reader need to be set at the same
+    	// time in a synchronized call in order to avoid any race condition
+    	// with the GUI thread (VideoEngine).
+    	setStallAddr(stall_addr);
+
+    	this.baseMemoryReader = baseMemoryReader;
+		this.baseMemoryReaderStartAddress = startAddress;
+		this.baseMemoryReaderEndAddress = endAddress;
+		resetMemoryReader(pc);
+    }
+
     public int getStallAddr() {
     	return stall_addr;
     }
 
     public boolean isStallReached() {
     	return pc == stall_addr && stall_addr != 0;
+    }
+
+    public boolean hasStallAddr() {
+    	return stall_addr != 0;
     }
 
     public boolean isStalledAtStart() {
@@ -332,28 +354,47 @@ public class PspGeList {
 		return status == PSP_GE_LIST_DRAWING;
 	}
 
-	private void resetMemoryReader() {
-		memoryReader = MemoryReader.getMemoryReader(pc, 4);
-	}
-
 	private void resetMemoryReader(int oldPc) {
-		if (memoryReader == null || pc < oldPc) {
-			resetMemoryReader();
+		if (pc >= baseMemoryReaderStartAddress && pc < baseMemoryReaderEndAddress) {
+			memoryReader = baseMemoryReader;
+			memoryReader.skip((pc - baseMemoryReader.getCurrentAddress()) >> 2);
+		} else if (memoryReader == null || memoryReader == baseMemoryReader || pc < oldPc) {
+			memoryReader = MemoryReader.getMemoryReader(pc, 4);
 		} else if (oldPc < MemoryMap.START_RAM && pc >= MemoryMap.START_RAM) {
 			// Jumping from VRAM to RAM
-			resetMemoryReader();
+			memoryReader = MemoryReader.getMemoryReader(pc, 4);
 		} else {
 			memoryReader.skip((pc - oldPc) >> 2);
 		}
 	}
 
-	public void setMemoryReader(IMemoryReader memoryReader) {
+	public synchronized void setMemoryReader(IMemoryReader memoryReader) {
 		this.memoryReader = memoryReader;
 	}
 
-	public int readNextInstruction() {
+	public boolean hasBaseMemoryReader() {
+		return baseMemoryReader != null;
+	}
+
+	public synchronized int readNextInstruction() {
 		pc += 4;
 		return memoryReader.readNext();
+	}
+
+	public synchronized int readPreviousInstruction() {
+		memoryReader.skip(-2);
+		int previousInstruction = memoryReader.readNext();
+		memoryReader.skip(1);
+
+		return previousInstruction;
+	}
+
+	public synchronized void undoRead() {
+		undoRead(1);
+	}
+
+	public synchronized void undoRead(int n) {
+		memoryReader.skip(-n);
 	}
 
 	public int getSaveContextAddr() {
@@ -377,6 +418,20 @@ public class PspGeList {
 		}
 
 		return false;
+	}
+
+	public int getSyncStatus() {
+		// Return the status PSP_GE_LIST_STALL_REACHED only when the stall address is reached.
+		// I.e. return PSP_GE_LIST_DRAWING when the stall address has been recently updated
+		// but the list processing has not yet been resumed and the status is still left
+		// at the value PSP_GE_LIST_STALL_REACHED.
+		if (status == PSP_GE_LIST_STALL_REACHED) {
+			if (!isStallReached()) {
+				return PSP_GE_LIST_DRAWING;
+			}
+		}
+
+		return status;
 	}
 
 	@Override

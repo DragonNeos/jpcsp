@@ -458,10 +458,6 @@ public class sceSasCore extends HLEModule {
             }
         }
 
-        if (log.isDebugEnabled()) {
-            log.debug(String.format("__sceSasGetEndFlag returning 0x%08X", endFlag));
-        }
-
         return endFlag;
     }
 
@@ -552,7 +548,7 @@ public class sceSasCore extends HLEModule {
         }
 
         checkSasAndVoiceHandlesGood(sasCore, voice);
-        
+
     	voices[voice].setVAG(vagAddr, size);
         voices[voice].setLoopMode(loopmode);
         
@@ -718,7 +714,11 @@ public class sceSasCore extends HLEModule {
     }
 
     private int getSimpleDecayRate(int bitfield1) {
-    	return 0x80000000 >>> ((bitfield1 >> 4) & 0x000F);
+    	int bitShift = (bitfield1 >> 4) & 0x000F;
+    	if (bitShift == 0) {
+    		return PSP_SAS_ENVELOPE_FREQ_MAX;
+    	}
+    	return 0x80000000 >>> bitShift;
     }
 
     private int getSimpleRate(int n) {
@@ -727,6 +727,18 @@ public class sceSasCore extends HLEModule {
     		return 0;
     	}
     	int rate = ((7 - (n & 0x3)) << 26) >>> (n >> 2);
+    	if (rate == 0) {
+    		return 1;
+    	}
+    	return rate;
+    }
+
+    private int getSimpleExponentRate(int n) {
+    	n &= 0x7F;
+    	if (n == 0x7F) {
+    		return 0;
+    	}
+    	int rate = ((7 - (n & 0x3)) << 24) >>> (n >> 2);
     	if (rate == 0) {
     		return 1;
     	}
@@ -747,9 +759,17 @@ public class sceSasCore extends HLEModule {
     		return 0;
     	}
     	if (getSimpleReleaseCurveType(bitfield2) == PSP_SAS_ADSR_CURVE_MODE_LINEAR_DECREASE) {
-    		return (0x40000000 >>> (n + 2));
+    		if (n == 30) {
+    			return 0x40000000;
+    		} else if (n == 29) {
+    			return 1;
+    		}
+    		return 0x10000000 >> n;
     	}
-    	return (0x8000000 >>> n);
+    	if (n == 0) {
+    		return PSP_SAS_ENVELOPE_FREQ_MAX;
+    	}
+    	return 0x80000000 >>> n;
     }
 
     private int getSimpleReleaseCurveType(int bitfield2) {
@@ -757,6 +777,9 @@ public class sceSasCore extends HLEModule {
     }
 
     private int getSimpleSustainRate(int bitfield2) {
+    	if (getSimpleSustainCurveType(bitfield2) == PSP_SAS_ADSR_CURVE_MODE_EXPONENT_DECREASE) {
+    		return getSimpleExponentRate(bitfield2 >> 6);
+    	}
     	return getSimpleRate(bitfield2 >> 6);
     }
 
@@ -1019,7 +1042,10 @@ public class sceSasCore extends HLEModule {
 
         int atrac3Context = getSasCoreAtrac3Context(sasCore, voice);
         AtracID atracID = Modules.sceAtrac3plusModule.getAtracIdFromContext(atrac3Context);
-        atracID.addStreamData(atrac3DataAddr.getAddress(), atrac3DataLength);
+        if (atracID.getSecondBufferAddr() != -1) {
+        	return SceKernelErrors.ERROR_SAS_CANNOT_CONCATENATE_ATRA3;
+        }
+        atracID.setSecondBuffer(atrac3DataAddr.getAddress(), atrac3DataLength);
 
         return 0;
     }
